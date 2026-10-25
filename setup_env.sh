@@ -157,8 +157,7 @@ Environment:    $VENV_DIR
 Normal commands work from the main repository because .venv is linked:
   cd "$PROJECT_ROOT"
   uv run --locked isaaclab list_envs --all --show_presets
-  uv run --locked isaaclab random_agent --task Isaac-Lift-Cube-Franka-v0 \
-      --num_envs 4 physics=isaacsim_physx
+  uv run --locked isaaclab random_agent --task Isaac-Lift-Franka-v0 --num_envs 4 physics=isaacsim_physx
   uv run --locked python -m pytest tests
 ----------------------------------------------------------------------------------
 EOF
