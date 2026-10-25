@@ -1,0 +1,17 @@
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+outputs/
+logs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+.pyright/
