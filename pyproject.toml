@@ -48,6 +48,7 @@ explicit = true
 index-strategy = "unsafe-best-match"
 prerelease = "allow"
 python-preference = "only-managed"
+python-downloads = "automatic"
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 # From https://github.com/isaac-sim/IsaacLab/blob/v3.0.0/tools/wheel_builder/uv-overrides.txt
