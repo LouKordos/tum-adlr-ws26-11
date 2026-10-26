@@ -72,9 +72,10 @@ PROJECT_VENV_LINK="$PROJECT_ROOT/.venv"
 
 if ! command -v uv >/dev/null 2>&1; then
     if ! command -v curl >/dev/null 2>&1; then
-        echo '[ERROR] uv and curl are missing. Install uv: https://docs.astral.sh/uv/getting-started/installation/' >&2
+        echo '[ERROR] Install uv first: https://docs.astral.sh/uv/getting-started/installation/' >&2
         exit 1
     fi
+
     echo '[INFO] Installing uv for the current user...'
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
