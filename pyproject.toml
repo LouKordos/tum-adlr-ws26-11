@@ -47,6 +47,7 @@ explicit = true
 [tool.uv]
 index-strategy = "unsafe-best-match"
 prerelease = "allow"
+link-mode = "hardlink"
 python-preference = "only-managed"
 python-downloads = "automatic"
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
