@@ -89,17 +89,11 @@ ENV_ROOT="$(cd -- "$ENV_ROOT" && pwd -P)"
 ENVIRONMENT_DIR="$ENV_ROOT/$ENV_NAME"
 VENV_DIR="$ENVIRONMENT_DIR/.venv"
 
-# Symlink to make uv run work
+# Never overwrite a real directory or file at .venv.
 if [[ -e "$PROJECT_VENV_LINK" || -L "$PROJECT_VENV_LINK" ]]; then
     if [[ ! -L "$PROJECT_VENV_LINK" ]]; then
         echo "[ERROR] $PROJECT_VENV_LINK already exists and is not a symlink." >&2
         echo '[ERROR] Refusing to overwrite an existing environment.' >&2
-        exit 1
-    fi
-    LINK_TARGET="$(readlink -- "$PROJECT_VENV_LINK")"
-    if [[ "$LINK_TARGET" != "$VENV_DIR" ]]; then
-        echo "[ERROR] $PROJECT_VENV_LINK points to a different environment: $LINK_TARGET" >&2
-        echo '[ERROR] Use the matching ENV_NAME/--root or explicitly remove the old symlink.' >&2
         exit 1
     fi
 fi
@@ -126,10 +120,6 @@ else
     echo '[WARNING] Initial uv.lock created. Review and commit it to version control.' >&2
 fi
 
-if [[ ! -L "$PROJECT_VENV_LINK" ]]; then
-    ln -s -- "$VENV_DIR" "$PROJECT_VENV_LINK"
-fi
-
 # Verify distribution metadata without launching an expensive graphical Kit app.
 "$VENV_DIR/bin/python" - <<'PY'
 import importlib.metadata
@@ -147,6 +137,15 @@ if not torch.version.cuda or not torch.version.cuda.startswith("13.0"):
     raise RuntimeError("Expected PyTorch built for CUDA 13.0.")
 print(f"[CHECK] CUDA GPU accessible: {torch.cuda.is_available()}")
 PY
+
+# Atomically select the requested environment after successful setup.
+if [[ ! -L "$PROJECT_VENV_LINK" ]] || [[ "$(readlink -- "$PROJECT_VENV_LINK")" != "$VENV_DIR" ]]; then
+    TEMP_LINK="$PROJECT_ROOT/.venv.tmp.$$"
+    trap 'rm -f -- "$TEMP_LINK"' EXIT
+    ln -s -- "$VENV_DIR" "$TEMP_LINK"
+    mv -Tf -- "$TEMP_LINK" "$PROJECT_VENV_LINK"
+    trap - EXIT
+fi
 
 cat <<EOF
 
