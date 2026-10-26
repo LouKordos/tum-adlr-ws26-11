@@ -109,15 +109,14 @@ export UV_PYTHON_PREFERENCE=only-managed
 
 cd -- "$PROJECT_ROOT"
 
-# Never silently rewrite an existing lockfile. On the very first invocation,
-# uv produces one using the exact dependency requirements in pyproject.toml.
+# Sync dependencies using the experiment's own lockfile.
 if [[ -f uv.lock ]]; then
-    echo '[INFO] Synchronizing from the existing lockfile...'
+    echo '[INFO] Synchronizing from uv.lock...'
     uv sync --locked --python 3.12
 else
-    echo '[INFO] No uv.lock found; resolving and creating the initial lockfile...'
+    echo '[WARNING] No uv.lock found; resolving dependencies.' >&2
     uv sync --python 3.12
-    echo '[WARNING] Initial uv.lock created. Review and commit it to version control.' >&2
+    echo '[WARNING] Review and commit the new uv.lock.' >&2
 fi
 
 # Verify distribution metadata without launching an expensive graphical Kit app.
