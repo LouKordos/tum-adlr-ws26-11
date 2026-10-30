@@ -13,6 +13,7 @@ dependencies = [
     "torchvision==0.26.0",
     "numpy>=2",
     "wandb>=0.31.0",
+    "imgui-bundle>=1.92.601",
 ]
 
 # Isaac Lab discovers external task packages through this group.

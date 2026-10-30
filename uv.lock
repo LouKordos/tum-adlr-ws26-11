@@ -41,6 +41,7 @@ name = "adlr-rwm"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "imgui-bundle" },
     { name = "isaaclab", extra = ["isaacsim"] },
     { name = "numpy" },
     { name = "torch" },
@@ -56,6 +57,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "imgui-bundle", specifier = ">=1.92.601" },
     { name = "isaaclab", extras = ["isaacsim"], specifier = "==3.0.0", index = "https://pypi.nvidia.com/" },
     { name = "numpy", specifier = ">=2" },
     { name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu130" },
