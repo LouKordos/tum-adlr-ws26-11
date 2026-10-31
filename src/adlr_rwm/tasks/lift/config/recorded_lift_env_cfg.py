@@ -1,19 +1,13 @@
-from pathlib import Path
-
 from isaaclab.envs.mdp.recorders import ActionStateRecorderManagerCfg
 from isaaclab.managers.recorder_manager import DatasetExportMode
 from isaaclab.utils import configclass
 from isaaclab_tasks.contrib.lift.config.franka.ik_abs_env_cfg import FrankaCubeLiftEnvCfg
-
-PROJECT_ROOT = Path(__file__).resolve().parents[5]
-DATASET_DIR = PROJECT_ROOT / "data" / "recordings"
 
 
 @configclass
 class RecordedLiftEnvCfg(FrankaCubeLiftEnvCfg):
     # Is reporting type error, I think because I am assigning a manager to the recorder field?
     recorders: object = ActionStateRecorderManagerCfg(
-        dataset_export_dir_path=str(DATASET_DIR),
         dataset_compression=True,
         dataset_export_mode=DatasetExportMode.EXPORT_ALL,
     )
