@@ -19,7 +19,7 @@ Specify a custom dataset directory:
 
     uv run python scripts/environments/state_machine/collect.py \
         --num_envs 32 --viz newton_gl \
-        --dataset-dir ~/datasets/adlr-rwm/recordings
+        --dataset_dir ~/datasets/adlr-rwm/recordings
 
 """
 
@@ -41,13 +41,13 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument(
-    "--dataset-dir",
+    "--dataset_dir",
     type=Path,
     default=DEFAULT_DATASET_DIR,
     help="Directory in which recorded HDF5 datasets are stored.",
 )
 parser.add_argument(
-    "--stats-interval",
+    "--stats_interval",
     type=float,
     default=10.0,
     help="Wall-clock seconds between collection statistics (default: 10). Must be positive.",
@@ -56,7 +56,7 @@ add_launcher_args(parser)
 # parse the arguments, forwarding unrecognized ones as Hydra-style task config overrides
 args_cli, hydra_overrides = parser.parse_known_args()
 if not math.isfinite(args_cli.stats_interval) or args_cli.stats_interval <= 0:
-    parser.error("--stats-interval must be a finite positive number")
+    parser.error("--stats_interval must be a finite positive number")
 
 from collections.abc import Sequence
 
