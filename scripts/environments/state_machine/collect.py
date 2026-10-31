@@ -37,8 +37,9 @@ import torch
 import warp as wp
 from isaaclab.assets.rigid_object.rigid_object_data import RigidObjectData
 from isaaclab.utils import index_fill_
-from isaaclab_tasks.contrib.lift.lift_env_cfg import LiftEnvCfg
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
+
+from adlr_rwm.tasks.lift.config.recorded_lift_env_cfg import RecordedLiftEnvCfg
 
 # initialize warp
 wp.init()
@@ -240,8 +241,8 @@ class PickAndLiftSm:
 
 def main():
     # parse configuration
-    env_cfg: LiftEnvCfg = parse_env_cfg(
-        "IsaacContrib-Lift-Cube-Franka-IK-Abs",
+    env_cfg: RecordedLiftEnvCfg = parse_env_cfg(
+        "ADLR-Lift-Cube-Franka-IK-Abs",
         device=args_cli.device,
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
@@ -249,7 +250,7 @@ def main():
     )
     with launch_simulation(env_cfg, args_cli):
         # create environment
-        env = gym.make("IsaacContrib-Lift-Cube-Franka-IK-Abs", cfg=env_cfg)
+        env = gym.make("ADLR-Lift-Cube-Franka-IK-Abs", cfg=env_cfg)
         # reset environment at start
         env.reset()
 
