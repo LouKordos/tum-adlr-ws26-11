@@ -325,16 +325,16 @@ def main():
                     # Target object frame
                     desired_position = env.unwrapped.command_manager.get_command("object_pose")[..., :3]
 
+                    # Reset state machine when an episode terminates or is truncated
+                    if dones.any():
+                        pick_sm.reset_idx(dones.nonzero(as_tuple=False).squeeze(-1))
+
                     # Advance state machine
                     actions = pick_sm.compute(
                         torch.cat([tcp_rest_position, tcp_rest_orientation], dim=-1),
                         torch.cat([object_position, desired_orientation], dim=-1),
                         torch.cat([desired_position, desired_orientation], dim=-1),
                     )
-
-                    # Reset state machine when an episode terminates or is truncated
-                    if dones.any():
-                        pick_sm.reset_idx(dones.nonzero(as_tuple=False).squeeze(-1))
 
         except KeyboardInterrupt:
             print("\n[INFO] Dataset collection interrupted.")
