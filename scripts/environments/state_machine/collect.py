@@ -24,6 +24,8 @@ Specify a custom dataset directory:
 """
 
 import argparse
+import math
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -44,9 +46,17 @@ parser.add_argument(
     default=DEFAULT_DATASET_DIR,
     help="Directory in which recorded HDF5 datasets are stored.",
 )
+parser.add_argument(
+    "--stats-interval",
+    type=float,
+    default=10.0,
+    help="Wall-clock seconds between collection statistics (default: 10). Must be positive.",
+)
 add_launcher_args(parser)
 # parse the arguments, forwarding unrecognized ones as Hydra-style task config overrides
 args_cli, hydra_overrides = parser.parse_known_args()
+if not math.isfinite(args_cli.stats_interval) or args_cli.stats_interval <= 0:
+    parser.error("--stats-interval must be a finite positive number")
 
 from collections.abc import Sequence
 
@@ -287,6 +297,7 @@ def main():
 
     with launch_simulation(env_cfg, args_cli):
         env = gym.make(TASK_NAME, cfg=env_cfg)
+        log_stats = None
 
         try:
             env.reset()
@@ -306,9 +317,45 @@ def main():
                 position_threshold=0.01,
             )
 
+            # Start timing after initialization. One vector step generates num_envs transitions.
+            started_at = last_stats_at = time.perf_counter()
+            steps = last_stats_steps = last_stats_episodes = 0
+
+            def log_stats(final: bool = False):
+                nonlocal last_stats_at, last_stats_steps, last_stats_episodes
+                now = time.perf_counter()
+                if not final and now - last_stats_at < args_cli.stats_interval:
+                    return
+
+                elapsed = max(now - started_at, 1e-9)
+                interval = max(now - last_stats_at, 1e-9)
+                num_envs = env.unwrapped.num_envs
+                recorder = env.unwrapped.recorder_manager
+                successes = recorder.exported_successful_episode_count
+                failures = recorder.exported_failed_episode_count
+                episodes = successes + failures
+                success_rate = f"{100 * successes / episodes:.1f}%" if episodes else "n/a"
+                recent_rate = (steps - last_stats_steps) * num_envs / interval
+                average_rate = steps * num_envs / elapsed
+                episode_rate = 60 * episodes / elapsed
+                file_mib = dataset_path.stat().st_size / (1024 * 1024)
+                label = "FINAL" if final else "STATS"
+                print(
+                    f"[{label}] elapsed={elapsed:.1f}s | env_steps={steps * num_envs:,} | "
+                    f"steps/s={recent_rate:,.0f} recent, {average_rate:,.0f} avg | "
+                    f"sim_time/env={steps * env.unwrapped.step_dt:.1f}s | "
+                    f"exported_episodes={episodes:,} (+{episodes - last_stats_episodes:,}, "
+                    f"{episode_rate:.1f}/min avg) | "
+                    f"success={successes:,}/{episodes:,} ({success_rate}), failed={failures:,} | "
+                    f"file={file_mib:.1f} MiB",
+                    flush=True,
+                )
+                last_stats_at, last_stats_steps, last_stats_episodes = now, steps, episodes
+
             while env.unwrapped.sim.is_running():
                 with torch.inference_mode():
                     _, _, terminated, truncated, _ = env.step(actions)
+                    steps += 1
                     dones = terminated | truncated
 
                     # End-effector frame
@@ -336,12 +383,18 @@ def main():
                         torch.cat([desired_position, desired_orientation], dim=-1),
                     )
 
+                log_stats()
+
         except KeyboardInterrupt:
             print("\n[INFO] Dataset collection interrupted.")
 
         finally:
-            env.close()  # Close the environment so the recorder can finalize its HDF5 file
-            print(f"[INFO] Dataset file closed: {dataset_path}")
+            try:
+                if log_stats is not None:
+                    log_stats(final=True)
+            finally:
+                env.close()  # Close the environment so the recorder can finalize its HDF5 file
+                print(f"[INFO] Dataset file closed: {dataset_path}")
 
 
 if __name__ == "__main__":
