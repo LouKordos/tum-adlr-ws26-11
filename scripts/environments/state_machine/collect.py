@@ -55,7 +55,6 @@ import isaaclab_tasks  # noqa: F401
 import torch
 import warp as wp
 from isaaclab.assets.rigid_object.rigid_object_data import RigidObjectData
-from isaaclab.managers.recorder_manager import RecorderManagerBaseCfg
 from isaaclab.utils import index_fill_
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
@@ -269,50 +268,37 @@ def main():
         overrides=hydra_overrides,
     )
 
-    # Resolve the dataset output directory.
     dataset_dir = args_cli.dataset_dir.expanduser().resolve()
     dataset_dir.mkdir(parents=True, exist_ok=True)
-
-    # Generate a unique, descriptive filename for this collection run.
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     dataset_filename = f"franka_lift_scripted_envs{env_cfg.scene.num_envs}_{timestamp}"
 
-    # Retrieve and configure the recorder before creating the environment.
     recorders_cfg = env_cfg.recorders
-
-    if not isinstance(recorders_cfg, RecorderManagerBaseCfg):
-        raise TypeError(
-            "The environment must have a RecorderManagerBaseCfg configuration before collecting trajectories."
-        )
-
     recorders_cfg.dataset_export_dir_path = str(dataset_dir)
     recorders_cfg.dataset_filename = dataset_filename
 
     dataset_path = dataset_dir / f"{dataset_filename}.hdf5"
 
-    # The HDF5 handler uses write mode, so never overwrite an existing dataset.
+    # The HDF5 handler uses write mode, so never overwrite an existing dataset
     if dataset_path.exists():
         raise FileExistsError(f"Dataset already exists: {dataset_path}")
 
     print(f"[INFO] Recording dataset to: {dataset_path}")
 
     with launch_simulation(env_cfg, args_cli):
-        # Create environment.
         env = gym.make(TASK_NAME, cfg=env_cfg)
 
         try:
-            # Reset environment at start.
             env.reset()
 
-            # Create action buffers (position + quaternion).
+            # Create action buffers (position + quaternion)
             actions = torch.zeros(env.unwrapped.action_space.shape, device=env.unwrapped.device)
             actions[:, 3] = 1.0
 
-            # Desired object orientation (we only do position control of object).
+            # Desired object orientation (we only do position control of object)
             desired_orientation = torch.zeros((env.unwrapped.num_envs, 4), device=env.unwrapped.device)
             desired_orientation[:, 1] = 1.0
 
-            # Create state machine.
             pick_sm = PickAndLiftSm(
                 env_cfg.sim.dt * env_cfg.decimation,
                 env.unwrapped.num_envs,
@@ -321,35 +307,32 @@ def main():
             )
 
             while env.unwrapped.sim.is_running():
-                # Run everything in inference mode.
                 with torch.inference_mode():
-                    # Step environment.
                     _, _, terminated, truncated, _ = env.step(actions)
                     dones = terminated | truncated
 
-                    # Observations.
-                    # -- End-effector frame.
+                    # End-effector frame
                     ee_frame_sensor = env.unwrapped.scene["ee_frame"]
                     tcp_rest_position = (
                         ee_frame_sensor.data.target_pos_w.torch[..., 0, :].clone() - env.unwrapped.scene.env_origins
                     )
                     tcp_rest_orientation = ee_frame_sensor.data.target_quat_w.torch[..., 0, :].clone()
 
-                    # -- Object frame.
+                    # Object frame
                     object_data: RigidObjectData = env.unwrapped.scene["object"].data
                     object_position = object_data.root_pos_w.torch - env.unwrapped.scene.env_origins
 
-                    # -- Target object frame.
+                    # Target object frame
                     desired_position = env.unwrapped.command_manager.get_command("object_pose")[..., :3]
 
-                    # Advance state machine.
+                    # Advance state machine
                     actions = pick_sm.compute(
                         torch.cat([tcp_rest_position, tcp_rest_orientation], dim=-1),
                         torch.cat([object_position, desired_orientation], dim=-1),
                         torch.cat([desired_position, desired_orientation], dim=-1),
                     )
 
-                    # Reset state machine when an episode terminates or is truncated.
+                    # Reset state machine when an episode terminates or is truncated
                     if dones.any():
                         pick_sm.reset_idx(dones.nonzero(as_tuple=False).squeeze(-1))
 
@@ -357,8 +340,7 @@ def main():
             print("\n[INFO] Dataset collection interrupted.")
 
         finally:
-            # Close the environment so the recorder can finalize its HDF5 file.
-            env.close()
+            env.close()  # Close the environment so the recorder can finalize its HDF5 file
             print(f"[INFO] Dataset file closed: {dataset_path}")
 
 
