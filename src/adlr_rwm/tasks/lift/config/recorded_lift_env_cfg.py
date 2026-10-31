@@ -10,7 +10,6 @@ class RecordedLiftEnvCfg(FrankaCubeLiftEnvCfg):
     recorders: object = ActionStateRecorderManagerCfg(
         dataset_export_dir_path="data/recordings",
         dataset_compression=True,
-        dataset_filename="franka_contrib_lift",
         dataset_export_mode=DatasetExportMode.EXPORT_ALL,
     )
 
