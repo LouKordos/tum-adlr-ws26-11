@@ -52,11 +52,19 @@ parser.add_argument(
     default=10.0,
     help="Wall-clock seconds between collection statistics (default: 10). Must be positive.",
 )
+parser.add_argument(
+    "--num_episodes",
+    type=int,
+    default=1_000_000,
+    help="Stop after at least this many completed episodes, including failures (default: 1000000).",
+)
 add_launcher_args(parser)
 # parse the arguments, forwarding unrecognized ones as Hydra-style task config overrides
 args_cli, hydra_overrides = parser.parse_known_args()
 if not math.isfinite(args_cli.stats_interval) or args_cli.stats_interval <= 0:
     parser.error("--stats_interval must be a finite positive number")
+if args_cli.num_episodes <= 0:
+    parser.error("--num_episodes must be a positive integer")
 
 from collections.abc import Sequence
 
@@ -297,6 +305,7 @@ def main():
 
     with launch_simulation(env_cfg, args_cli):
         env = gym.make(TASK_NAME, cfg=env_cfg)
+        recorder = env.unwrapped.recorder_manager
         log_stats = None
 
         try:
@@ -330,7 +339,6 @@ def main():
                 elapsed = max(now - started_at, 1e-9)
                 interval = max(now - last_stats_at, 1e-9)
                 num_envs = env.unwrapped.num_envs
-                recorder = env.unwrapped.recorder_manager
                 successes = recorder.exported_successful_episode_count
                 failures = recorder.exported_failed_episode_count
                 episodes = successes + failures
@@ -344,7 +352,7 @@ def main():
                     f"[{label}] elapsed={elapsed:.1f}s | env_steps={steps * num_envs:,} | "
                     f"steps/s={recent_rate:,.0f} recent, {average_rate:,.0f} avg | "
                     f"sim_time/env={steps * env.unwrapped.step_dt:.1f}s | "
-                    f"exported_episodes={episodes:,} (+{episodes - last_stats_episodes:,}, "
+                    f"exported_episodes={episodes:,}/{args_cli.num_episodes:,} (+{episodes - last_stats_episodes:,}, "
                     f"{episode_rate:.1f}/min avg) | "
                     f"success={successes:,}/{episodes:,} ({success_rate}), failed={failures:,} | "
                     f"file={file_mib:.1f} MiB",
@@ -356,6 +364,16 @@ def main():
                 with torch.inference_mode():
                     _, _, terminated, truncated, _ = env.step(actions)
                     steps += 1
+                    # Auto-reset exports finished episodes before step() returns. These counters persist across resets.
+                    num_completed_episodes = (
+                        recorder.exported_successful_episode_count + recorder.exported_failed_episode_count
+                    )
+                    if num_completed_episodes >= args_cli.num_episodes:
+                        print(
+                            f"[INFO] Episode target reached: {num_completed_episodes:,}/{args_cli.num_episodes:,}.",
+                            flush=True,
+                        )
+                        break
                     dones = terminated | truncated
 
                     # End-effector frame
