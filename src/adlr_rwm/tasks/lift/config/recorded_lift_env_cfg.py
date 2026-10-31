@@ -1,30 +1,20 @@
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-import torch
 from isaaclab.envs.mdp.recorders import ActionStateRecorderManagerCfg
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.managers import TerminationTermCfg
 from isaaclab.managers.recorder_manager import DatasetExportMode
 from isaaclab.utils import configclass
+from isaaclab_tasks.contrib.lift import lift_env_cfg
 from isaaclab_tasks.contrib.lift.config.franka.ik_abs_env_cfg import FrankaCubeLiftEnvCfg
 
-if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedRLEnv
+from adlr_rwm.tasks.lift.mdp.success import lift_success
 
 
-def object_reached_goal_position(
-    env: ManagerBasedRLEnv, command_name: str, threshold: float, asset_cfg: SceneEntityCfg
-):
-    asset = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    des_pos_w = command[:, :3]
-    curr_pos_w = asset.data.body_pos_w.torch[:, asset_cfg.body_ids][:, 0] # copied from mdp.position_command_error; indexing probably shouldn't be changed
-
-    pos_error = torch.linalg.norm(curr_pos_w - des_pos_w, dim=1)
-
-    return pos_error < threshold
+@configclass
+class RecordedLiftTerminationsCfg(lift_env_cfg.TerminationsCfg):
+    # Needed so that RecorderManager automatically labels successful and failed trajectories
+    # We call it success because that is how it's parsed by the recorder manager, and set time_out = True
+    # because that makes it set truncated instead of terminated. This makes sense because it is only True on the last
+    # timestep, so that the lifted cube actually has to *stay* lifted.
+    success = TerminationTermCfg(func=lift_success, time_out=True)
 
 
 @configclass
@@ -35,10 +25,7 @@ class RecordedLiftEnvCfg(FrankaCubeLiftEnvCfg):
         dataset_export_mode=DatasetExportMode.EXPORT_ALL,
     )
 
+    terminations: object = RecordedLiftTerminationsCfg()
+
     def __post_init__(self):
         super().__post_init__()
-
-        self.terminations.object_reached_goal = DoneTerm(
-            func=object_reached_goal_position,
-            params={"command_name": "object_pose", "asset_cfg": SceneEntityCfg("object"), "threshold": 0.05},
-        )
