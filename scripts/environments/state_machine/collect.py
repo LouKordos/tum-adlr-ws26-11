@@ -5,14 +5,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Script to run an environment with a pick and lift state machine.
+Script to run a Franka pick-and-lift state machine and record trajectories.
 
 The state machine is implemented in the kernel function `infer_state_machine`.
 It uses the `warp` library to run the state machine in parallel on the GPU.
 
-.. code-block:: bash
+Example:
 
-    uv run python scripts/environments/state_machine/lift_cube_sm.py --num_envs 32 --viz kit
+    uv run python scripts/environments/state_machine/collect.py \
+        --num_envs 32 --viz newton_gl
+
+Specify a custom dataset directory:
+
+    uv run python scripts/environments/state_machine/collect.py \
+        --num_envs 32 --viz newton_gl \
+        --dataset-dir ~/datasets/adlr-rwm/recordings
 
 """
 
