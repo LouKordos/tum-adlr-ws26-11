@@ -1,0 +1,1 @@
+# dataclasses for WM config
