@@ -1,7 +1,9 @@
-# Source: rsl_rl_rwm (https://github.com/leggedrobotics/rsl_rl_rwm)
+# Modified from: rsl_rl_rwm (https://github.com/leggedrobotics/rsl_rl_rwm)
 
 import torch
 from torch import nn
+
+from adlr_rwm.configs import RNNConfig
 
 
 class RNNBase(nn.Module):
@@ -9,16 +11,21 @@ class RNNBase(nn.Module):
         self,
         input_dim: int,
         device: str,
-        architecture_config: dict = None,
+        architecture_config: RNNConfig
     ):
         super().__init__()
         self.input_dim = input_dim
         self.device = device
 
-        rnn_type = architecture_config["rnn_type"]
-        rnn_num_layers = architecture_config["rnn_num_layers"]
-        rnn_hidden_size = architecture_config["rnn_hidden_size"]
-        self.memory = Memory(input_dim, device, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+        rnn_type = architecture_config.type
+        rnn_num_layers = architecture_config.num_layers
+        rnn_hidden_size = architecture_config.hidden_size
+
+        self.memory = Memory(input_dim, device,
+                             type=rnn_type,
+                             num_layers=rnn_num_layers,
+                             hidden_size=rnn_hidden_size
+                             )
 
     def forward(self, x_state_batch, x_action_batch):
         x = torch.cat([x_state_batch, x_action_batch], dim=-1)
@@ -49,6 +56,7 @@ class Memory(nn.Module):
 
     def forward(self, x):
         x, self.hidden_states = self.rnn(x, self.hidden_states)
+        return x
         return x[:, -1]
 
     def reset(self):
