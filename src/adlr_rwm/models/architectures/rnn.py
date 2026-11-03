@@ -1,9 +1,8 @@
 # Modified from: rsl_rl_rwm (https://github.com/leggedrobotics/rsl_rl_rwm)
 
 import torch
+from omegaconf import DictConfig
 from torch import nn
-
-from adlr_rwm.configs import RNNConfig
 
 
 class RNNBase(nn.Module):
@@ -11,13 +10,13 @@ class RNNBase(nn.Module):
         self,
         input_dim: int,
         device: str,
-        architecture_config: RNNConfig
+        architecture_config: DictConfig
     ):
         super().__init__()
         self.input_dim = input_dim
         self.device = device
 
-        rnn_type = architecture_config.type
+        rnn_type = architecture_config.architecture
         rnn_num_layers = architecture_config.num_layers
         rnn_hidden_size = architecture_config.hidden_size
 
@@ -56,7 +55,6 @@ class Memory(nn.Module):
 
     def forward(self, x):
         x, self.hidden_states = self.rnn(x, self.hidden_states)
-        return x
         return x[:, -1]
 
     def reset(self):

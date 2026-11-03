@@ -1,19 +1,13 @@
 
 import torch
+from omegaconf import DictConfig
 from torch import nn
-
-from adlr_rwm.configs import (
-    MLPAuxiliaryHeadConfig,
-    MLPBaseConfig,
-    MLPConfig,
-    MLPStateHeadConfig,
-)
 
 
 def build_mlp(
     input_dim: int,
     output_dim: int | None,
-    config: MLPConfig,
+    config: DictConfig,
     device: str,
 ) -> nn.Sequential:
     """Build an MLP with ReLU activations and an optional output layer."""
@@ -38,8 +32,9 @@ class MLPBase(nn.Module):
     def __init__(
         self,
         input_dim: int,
+        output_dim: int | None,
         device: str,
-        architecture_config: MLPBaseConfig,
+        architecture_config: DictConfig
     ):
         super().__init__()
 
@@ -48,8 +43,8 @@ class MLPBase(nn.Module):
 
         self.layers = build_mlp(
             input_dim=input_dim,
-            output_dim=None,
-            config=architecture_config.network,
+            output_dim=output_dim,
+            config=architecture_config,
             device=device,
         )
 
@@ -71,7 +66,7 @@ class MLPStateHead(nn.Module):
         input_dim: int,
         state_dim: int,
         device: str,
-        architecture_config: MLPStateHeadConfig,
+        architecture_config: DictConfig,
     ):
         super().__init__()
 
@@ -154,7 +149,7 @@ class MLPAuxiliaryHead(nn.Module):
         contact_dim: int,
         termination_dim: int,
         device: str,
-        architecture_config: MLPAuxiliaryHeadConfig,
+        architecture_config: DictConfig,
     ):
         super().__init__()
 

@@ -1,0 +1,4 @@
+type: rnn
+architecture: gru
+num_layers: 2
+hidden_size: 256

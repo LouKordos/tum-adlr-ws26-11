@@ -1,0 +1,181 @@
+
+# ============================================================
+# World Model
+# ============================================================
+
+world_model:
+
+  # ----------------------------------------------------------
+  # Ensemble
+  # ----------------------------------------------------------
+
+  ensemble_size: 5
+  bootstrap: false
+  freeze_auxiliary: false
+
+  # ----------------------------------------------------------
+  # Dimensions
+  # ----------------------------------------------------------
+
+  state_dim: ???
+  action_dim: ???
+
+  extension_dim: 0
+  contact_dim: 0
+  termination_dim: 0
+
+  # ----------------------------------------------------------
+  # Temporal configuration
+  # ----------------------------------------------------------
+
+  history_horizon: 5
+  forecast_horizon: 10
+
+  # Prediction type:
+  # single   -> predict one timestep at a time
+  # sequence -> predict an entire sequence
+  prediction_type: single
+
+  # ----------------------------------------------------------
+  # Architecture
+  # ----------------------------------------------------------
+
+  base:
+
+    type: mlp
+
+    # MLP configuration
+    mlp:
+      hidden_dims: [256, 256]
+      activation: relu
+
+    # RNN configuration
+    rnn:
+      type: gru
+      num_layers: 2
+      hidden_size: 256
+
+  # ----------------------------------------------------------
+  # State prediction head
+  # ----------------------------------------------------------
+
+  state_head:
+
+    # deterministic | probabilistic
+    type: probabilistic
+
+    mean:
+      hidden_dims: [256, 256]
+      activation: relu
+
+    # Used only for probabilistic predictions
+    logstd:
+      hidden_dims: [256, 256]
+      activation: relu
+
+    # Learnable log-standard-deviation bounds
+    min_logstd_init: -5.0
+    log_delta_logstd_init: 0.0
+
+  # ----------------------------------------------------------
+  # Auxiliary prediction heads
+  # ----------------------------------------------------------
+
+  auxiliary_head:
+
+    extension:
+      hidden_dims: [128, 128]
+      activation: relu
+
+    contact:
+      hidden_dims: [128, 128]
+      activation: relu
+
+    termination:
+      hidden_dims: [128, 128]
+      activation: relu
+
+  # ----------------------------------------------------------
+  # Loss configuration
+  # ----------------------------------------------------------
+
+  loss:
+
+    # mse | gaussian_nll
+    state_loss: mse
+
+    # Currently hardcoded in the implementation
+    extension_loss: mse
+    contact_loss: bce
+    termination_loss: bce
+
+    # Weights (not currently implemented in compute_loss)
+    state_weight: 1.0
+    sequence_weight: 1.0
+    bound_weight: 1.0
+    kl_weight: 1.0
+    extension_weight: 1.0
+    contact_weight: 1.0
+    termination_weight: 1.0
+
+  # ----------------------------------------------------------
+  # Uncertainty
+  # ----------------------------------------------------------
+
+  uncertainty:
+
+    # Aleatoric and epistemic uncertainty are currently
+    # computed from the state ensemble outputs.
+    aleatoric: true
+    epistemic: true
+
+    # Currently hardcoded to summation over state dimensions
+    aggregation: sum
+
+  # ----------------------------------------------------------
+  # Device
+  # ----------------------------------------------------------
+
+  device: cuda
+
+
+# ============================================================
+# Policy
+# ============================================================
+
+policy:
+
+  type: mlp
+
+  # Placeholder: policy implementation not included
+  # in the supplied source code.
+
+  mlp:
+    hidden_dims: [256, 256]
+    activation: relu
+
+  rnn:
+    type: gru
+    num_layers: 1
+    hidden_size: 256
+
+
+# ============================================================
+# Training
+# ============================================================
+
+training:
+
+  batch_size: 256
+  learning_rate: 3.0e-4
+  num_epochs: 1000
+
+  optimizer: adam
+
+  # World model training
+  world_model:
+    bootstrap: false
+
+  # Policy training
+  policy:
+    learning_rate: 3.0e-4

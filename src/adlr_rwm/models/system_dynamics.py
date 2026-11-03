@@ -2,6 +2,7 @@
 # TODO: adjust this to our task (check architecture and setup hydra)
 
 import torch
+from omegaconf import DictConfig
 from torch import nn
 
 from .architectures import MLPAuxiliaryHead, MLPBase, MLPStateHead, RNNBase
@@ -10,28 +11,22 @@ from .architectures import MLPAuxiliaryHead, MLPBase, MLPStateHead, RNNBase
 class SystemDynamicsEnsemble(nn.Module):
     def __init__(
         self,
-        state_dim: int,
-        action_dim: int,
-        extension_dim: int,
-        contact_dim: int,
-        termination_dim: int,
-        device: str,
-        ensemble_size: int = 1,
-        history_horizon: int = 1,
-        architecture_config: dict = None,
-        freeze_auxiliary: bool = False,
+        config: DictConfig,
     ):
         super().__init__()
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.extension_dim = extension_dim
-        self.contact_dim = contact_dim
-        self.termination_dim = termination_dim
-        self.device = device
-        self.ensemble_size = ensemble_size
-        self.history_horizon = history_horizon
-        self.architecture_config = architecture_config
-        self.freeze_auxiliary = freeze_auxiliary
+        self.state_dim = config.state_dim
+        self.action_dim = config.action_dim
+        self.extension_dim = config.extension_dim
+        self.contact_dim = config.contact_dim
+        self.termination_dim = config.termination_dim
+        self.device = config.device
+        self.history_horizon = config.history_horizon
+
+        # main NN configurations
+        self.base_cfg = config.base
+        self.state_head_cfg = config.state_head
+        self.auxiliary_head_cfg = config.auxiliary_head
+        self.ensemble_size = config.ensemble_size  # number of state/aux heads
 
         self._init_networks()
 
@@ -39,9 +34,12 @@ class SystemDynamicsEnsemble(nn.Module):
         self.state_base = self._create_base()
         self.state_heads = nn.ModuleList(
             [
-                MLPStateHead(self.base_output_dim, self.state_dim, self.device, self.architecture_config).to(
-                    self.device
-                )
+                MLPStateHead(
+                             self.base_output_dim,
+                             self.state_dim,
+                             self.device,
+                             self.state_head_cfg
+                ).to(self.device)
                 for _ in range(self.ensemble_size)
             ]
         )
@@ -55,34 +53,32 @@ class SystemDynamicsEnsemble(nn.Module):
                     self.contact_dim,
                     self.termination_dim,
                     self.device,
-                    self.architecture_config,
+                    self.auxiliary_head_cfg,
                 ).to(self.device)
                 for _ in range(self.ensemble_size)
             ]
         )
 
-        if self.freeze_auxiliary:
-            for param in self.auxiliary_base.parameters():
-                param.requires_grad = False
-            for head in self.auxiliary_heads:
-                for param in head.parameters():
-                    param.requires_grad = False
-
     def _create_base(self):
-        if self.architecture_config["type"] == "mlp":
+        if self.base_cfg.type == "mlp":
             input_dim = self.history_horizon * (self.state_dim + self.action_dim)
-            self.base_output_dim = self.architecture_config["base_shape"][-1]
+            self.base_output_dim = self.base_cfg.network.output_dim
             self.prediction_type = "single"
             return MLPBase(
                 input_dim=input_dim,
+                output_dim=self.base_output_dim,
                 device=self.device,
-                architecture_config=self.architecture_config,
+                architecture_config=self.base_cfg.network
             )
-        elif self.architecture_config["type"] == "rnn":
+        elif self.base_cfg.type == "rnn":
             input_dim = self.state_dim + self.action_dim
-            self.base_output_dim = self.architecture_config["rnn_hidden_size"]
+            self.base_output_dim = self.base_cfg.hidden_size
             self.prediction_type = "single"
-            return RNNBase(input_dim=input_dim, device=self.device, architecture_config=self.architecture_config)
+            return RNNBase(
+                input_dim=input_dim,
+                device=self.device,
+                architecture_config=self.base_cfg
+            )
         else:
             raise ValueError("Invalid architecture type.")
 

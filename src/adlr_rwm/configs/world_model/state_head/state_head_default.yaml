@@ -1,0 +1,8 @@
+# default config for state predictor heads
+mean:
+  hidden_dims: [256, 256]
+  activation: relu
+
+logstd:
+  hidden_dims: [256, 256]
+  activation: relu

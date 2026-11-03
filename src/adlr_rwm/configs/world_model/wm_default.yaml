@@ -1,0 +1,21 @@
+ensemble_size: 5
+bootstrap: true
+
+history_horizon: 5
+forecast_horizon: 10 # TODO: integrate this in the code, this is currently inferred 
+
+state_dim: ???
+action_dim: ???
+
+# auxiliary predictions
+extension_dim: 0
+contact_dim: 0
+termination_dim: 0
+
+device: cuda
+
+defaults:
+  - base: rnn
+  - state_head: state_head_default
+  - auxiliary_head: aux_head_default
+  - _self_

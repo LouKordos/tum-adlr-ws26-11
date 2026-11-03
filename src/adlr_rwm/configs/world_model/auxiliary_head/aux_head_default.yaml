@@ -1,0 +1,14 @@
+# default config for auxiliary heads
+# setting to None disables the head
+
+extension:
+  hidden_dims: [128, 128]
+  activation: relu
+
+contact:
+  hidden_dims: [128, 128]
+  activation: relu
+
+termination:
+  hidden_dims: [128, 128]
+  activation: relu
