@@ -6,12 +6,7 @@ from torch import nn
 
 
 class RNNBase(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        device: str,
-        architecture_config: DictConfig
-    ):
+    def __init__(self, input_dim: int, device: str, architecture_config: DictConfig):
         super().__init__()
         self.input_dim = input_dim
         self.device = device
@@ -20,11 +15,7 @@ class RNNBase(nn.Module):
         rnn_num_layers = architecture_config.num_layers
         rnn_hidden_size = architecture_config.hidden_size
 
-        self.memory = Memory(input_dim, device,
-                             type=rnn_type,
-                             num_layers=rnn_num_layers,
-                             hidden_size=rnn_hidden_size
-                             )
+        self.memory = Memory(input_dim, device, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
 
     def forward(self, x_state_batch, x_action_batch):
         x = torch.cat([x_state_batch, x_action_batch], dim=-1)

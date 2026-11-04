@@ -2,9 +2,7 @@ import torch
 from omegaconf import DictConfig
 from torch import nn
 
-ACTIVATIONS = {
-    "relu": nn.ReLU
-}
+ACTIVATIONS = {"relu": nn.ReLU}
 
 
 def build_mlp(
@@ -19,10 +17,7 @@ def build_mlp(
     curr_dim = input_dim
 
     for hidden_dim in config.hidden_dims:
-        layers.extend([
-            nn.Linear(curr_dim, hidden_dim),
-            ACTIVATIONS[config.activation]()
-        ])
+        layers.extend([nn.Linear(curr_dim, hidden_dim), ACTIVATIONS[config.activation]()])
         curr_dim = hidden_dim
 
     if output_dim is not None:
@@ -32,13 +27,7 @@ def build_mlp(
 
 
 class MLPBase(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int | None,
-        device: str,
-        architecture_config: DictConfig
-    ):
+    def __init__(self, input_dim: int, output_dim: int | None, device: str, architecture_config: DictConfig):
         super().__init__()
 
         self.input_dim = input_dim
@@ -94,12 +83,8 @@ class MLPStateHead(nn.Module):
                 device=device,
             )
 
-            self.state_min_logstd = nn.Parameter(
-                torch.ones(1, state_dim, device=device) * -5.0
-            )
-            self.state_log_delta_logstd = nn.Parameter(
-                torch.zeros(1, state_dim, device=device)
-            )
+            self.state_min_logstd = nn.Parameter(torch.ones(1, state_dim, device=device) * -5.0)
+            self.state_log_delta_logstd = nn.Parameter(torch.zeros(1, state_dim, device=device))
 
     @property
     def state_max_logstd(self) -> torch.Tensor:
@@ -118,20 +103,11 @@ class MLPStateHead(nn.Module):
         if self.output_std:
             state_logstd = self.state_logstd_layers(x)
 
-            state_max_logstd = (
-                self.state_min_logstd
-                + torch.exp(self.state_log_delta_logstd)
-            )
+            state_max_logstd = self.state_min_logstd + torch.exp(self.state_log_delta_logstd)
 
-            state_logstd = (
-                self.state_max_logstd
-                - nn.functional.softplus(state_max_logstd - state_logstd)
-            )
+            state_logstd = self.state_max_logstd - nn.functional.softplus(state_max_logstd - state_logstd)
 
-            state_logstd = (
-                self.state_min_logstd
-                + nn.functional.softplus(state_logstd - self.state_min_logstd)
-            )
+            state_logstd = self.state_min_logstd + nn.functional.softplus(state_logstd - self.state_min_logstd)
         else:
             state_logstd = torch.full_like(state_mean, -torch.inf)
 
@@ -169,22 +145,28 @@ class MLPAuxiliaryHead(nn.Module):
         if extension_dim > 0:
             assert architecture_config.extension is not None
             self.extension_layers = build_mlp(
-                input_dim, extension_dim,
-                architecture_config.extension, device,
+                input_dim,
+                extension_dim,
+                architecture_config.extension,
+                device,
             )
 
         if contact_dim > 0:
             assert architecture_config.contact is not None
             self.contact_layers = build_mlp(
-                input_dim, contact_dim,
-                architecture_config.contact, device,
+                input_dim,
+                contact_dim,
+                architecture_config.contact,
+                device,
             )
 
         if termination_dim > 0:
             assert architecture_config.termination is not None
             self.termination_layers = build_mlp(
-                input_dim, termination_dim,
-                architecture_config.termination, device,
+                input_dim,
+                termination_dim,
+                architecture_config.termination,
+                device,
             )
 
     def forward(self, x, x_state_batch):
@@ -194,28 +176,17 @@ class MLPAuxiliaryHead(nn.Module):
         else:
             sequence_len = 0
 
-        extension_pred = (
-            self.extension_layers(x) if self.extension_dim > 0 else None
-        )
-        contact_logits = (
-            self.contact_layers(x) if self.contact_dim > 0 else None
-        )
-        termination_logits = (
-            self.termination_layers(x) if self.termination_dim > 0 else None
-        )
+        extension_pred = self.extension_layers(x) if self.extension_dim > 0 else None
+        contact_logits = self.contact_layers(x) if self.contact_dim > 0 else None
+        termination_logits = self.termination_layers(x) if self.termination_dim > 0 else None
 
         if sequence_len > 0:
             extension_pred = (
-                extension_pred.view(-1, sequence_len, self.extension_dim)
-                if self.extension_dim > 0 else None
+                extension_pred.view(-1, sequence_len, self.extension_dim) if self.extension_dim > 0 else None
             )
-            contact_logits = (
-                contact_logits.view(-1, sequence_len, self.contact_dim)
-                if self.contact_dim > 0 else None
-            )
+            contact_logits = contact_logits.view(-1, sequence_len, self.contact_dim) if self.contact_dim > 0 else None
             termination_logits = (
-                termination_logits.view(-1, sequence_len, self.termination_dim)
-                if self.termination_dim > 0 else None
+                termination_logits.view(-1, sequence_len, self.termination_dim) if self.termination_dim > 0 else None
             )
 
         return extension_pred, contact_logits, termination_logits

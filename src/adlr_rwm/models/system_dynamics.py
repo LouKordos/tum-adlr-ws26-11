@@ -13,7 +13,6 @@
 # We should consider if this is worth integrating (the source repo doesn't)
 
 
-
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -50,12 +49,7 @@ class SystemDynamicsEnsemble(nn.Module):
         self.state_base = self._create_base()
         self.state_heads = nn.ModuleList(
             [
-                MLPStateHead(
-                             self.base_output_dim,
-                             self.state_dim,
-                             self.device,
-                             self.state_head_cfg
-                ).to(self.device)
+                MLPStateHead(self.base_output_dim, self.state_dim, self.device, self.state_head_cfg).to(self.device)
                 for _ in range(self.ensemble_size)
             ]
         )
@@ -84,26 +78,17 @@ class SystemDynamicsEnsemble(nn.Module):
                 input_dim=input_dim,
                 output_dim=self.base_output_dim,
                 device=self.device,
-                architecture_config=self.base_cfg.network
+                architecture_config=self.base_cfg.network,
             )
         elif self.base_cfg.type == "rnn":
             input_dim = self.state_dim + self.action_dim
             self.base_output_dim = self.base_cfg.hidden_size
             self.prediction_type = "single"
-            return RNNBase(
-                input_dim=input_dim,
-                device=self.device,
-                architecture_config=self.base_cfg
-            )
+            return RNNBase(input_dim=input_dim, device=self.device, architecture_config=self.base_cfg)
         else:
             raise ValueError("Invalid architecture type.")
 
-    def forward(
-                self,
-                x_state_batch: torch.Tensor,
-                x_action_batch: torch.Tensor,
-                model_ids=None
-            ):
+    def forward(self, x_state_batch: torch.Tensor, x_action_batch: torch.Tensor, model_ids=None):
 
         # shape checks and safety measures
         x_state_batch = x_state_batch.to(self.device)
@@ -116,15 +101,13 @@ class SystemDynamicsEnsemble(nn.Module):
 
         if self.base_cfg.type == "mlp":
             assert x_state_batch.shape[1] == self.history_horizon, (
-                f"MLP requires full history_horizon ({self.history_horizon}), "
-                f"got T={x_state_batch.shape[1]}."
+                f"MLP requires full history_horizon ({self.history_horizon}), got T={x_state_batch.shape[1]}."
             )
         elif self.base_cfg.type == "rnn":
             if self.state_base.memory.hidden_states is None:
                 # Cold start: requires full history window to warm up memory
                 assert x_state_batch.shape[1] == self.history_horizon, (
-                    f"RNN cold start requires history_horizon ({self.history_horizon}), "
-                    f"got T={x_state_batch.shape[1]}."
+                    f"RNN cold start requires history_horizon ({self.history_horizon}), got T={x_state_batch.shape[1]}."
                 )
             else:
                 # Active hidden state: expect single-step autoregressive update
@@ -132,7 +115,6 @@ class SystemDynamicsEnsemble(nn.Module):
                     f"RNN with active hidden_states expects single-step input (T=1), "
                     f"got T={x_state_batch.shape[1]}. Call model.reset() first if starting a new sequence."
                 )
-
 
         state_means, state_stds, extensions, contacts, terminations = [], [], [], [], []
         state_base_output = self.state_base(x_state_batch, x_action_batch)
@@ -212,7 +194,7 @@ class SystemDynamicsEnsemble(nn.Module):
         termination_losses = []
 
         for i in range(self.ensemble_size):
-            self.reset() # reset rnn hidden states, otherwise hidden states leak from one head to another!
+            self.reset()  # reset rnn hidden states, otherwise hidden states leak from one head to another!
 
             if bootstrap:
                 ids = torch.randint(0, state_batch.shape[0], (state_batch.shape[0],), device=self.device)
@@ -257,13 +239,12 @@ class SystemDynamicsEnsemble(nn.Module):
     def compute_state_loss(self, head, state_batch, action_batch):
         assert (
             self.forecast_horizon + self.history_horizon == state_batch.shape[1]
-            and
-            self.forecast_horizon + self.history_horizon == action_batch.shape[1]
+            and self.forecast_horizon + self.history_horizon == action_batch.shape[1]
         ), (
-                    f"Training trajectories must be of length "
-                    f"T = History + Forecast "
-                    f"(={self.forecast_horizon + self.history_horizon}). "
-                    f"The input has: T={state_batch.shape[1]}"
+            f"Training trajectories must be of length "
+            f"T = History + Forecast "
+            f"(={self.forecast_horizon + self.history_horizon}). "
+            f"The input has: T={state_batch.shape[1]}"
         )
 
         forecast_horizon = self.forecast_horizon
@@ -296,11 +277,7 @@ class SystemDynamicsEnsemble(nn.Module):
 
             state_loss, sequence_loss = self.compute_regression_loss(state_mean_pred, state_std_pred, state_target)
             bound_loss = self.compute_bound_loss(head) if head.output_std else torch.tensor(0.0, device=self.device)
-            kl_loss = (
-                self.state_base.kl_loss
-                if self.base_cfg.type == "rssm"
-                else torch.tensor(0.0, device=self.device)
-            )
+            kl_loss = self.state_base.kl_loss if self.base_cfg.type == "rssm" else torch.tensor(0.0, device=self.device)
 
             state_losses.append(state_loss.unsqueeze(0))
             sequence_losses.append(sequence_loss.unsqueeze(0))
@@ -350,12 +327,13 @@ class SystemDynamicsEnsemble(nn.Module):
                 extension_batch,
                 contact_batch,
                 termination_batch,
-            ) if batch is not None
+            )
+            if batch is not None
         ), (
             f"Training trajectories must be of length "
             f"T = History + Forecast "
             f"(={self.forecast_horizon + self.history_horizon})."
-        )     
+        )
 
         forecast_horizon = self.forecast_horizon
         x_state_batch = state_batch[:, : self.history_horizon]
