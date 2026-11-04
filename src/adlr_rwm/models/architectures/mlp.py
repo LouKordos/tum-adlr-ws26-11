@@ -1,7 +1,11 @@
-
 import torch
 from omegaconf import DictConfig
 from torch import nn
+
+
+ACTIVATIONS = {
+    "relu": nn.ReLU
+}
 
 
 def build_mlp(
@@ -18,7 +22,7 @@ def build_mlp(
     for hidden_dim in config.hidden_dims:
         layers.extend([
             nn.Linear(curr_dim, hidden_dim),
-            config.activation(),
+            ACTIVATIONS[config.activation]()
         ])
         curr_dim = hidden_dim
 

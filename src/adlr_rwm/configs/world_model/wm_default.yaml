@@ -4,8 +4,8 @@ bootstrap: true
 history_horizon: 5
 forecast_horizon: 10 # TODO: integrate this in the code, this is currently inferred 
 
-state_dim: ???
-action_dim: ???
+state_dim: 10
+action_dim: 10
 
 # auxiliary predictions
 extension_dim: 0
