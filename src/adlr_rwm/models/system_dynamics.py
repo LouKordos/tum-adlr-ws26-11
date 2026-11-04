@@ -104,8 +104,35 @@ class SystemDynamicsEnsemble(nn.Module):
                 x_action_batch: torch.Tensor,
                 model_ids=None
             ):
+
+        # shape checks and safety measures
         x_state_batch = x_state_batch.to(self.device)
         x_action_batch = x_action_batch.to(self.device)
+
+        assert x_state_batch.shape[:2] == x_action_batch.shape[:2], (
+            f"Batch size and sequence length must match between x_state_batch {x_state_batch.shape[:2]} "
+            f"and x_action_batch {x_action_batch.shape[:2]}."
+        )
+
+        if self.base_cfg.type == "mlp":
+            assert x_state_batch.shape[1] == self.history_horizon, (
+                f"MLP requires full history_horizon ({self.history_horizon}), "
+                f"got T={x_state_batch.shape[1]}."
+            )
+        elif self.base_cfg.type == "rnn":
+            if self.state_base.memory.hidden_states is None:
+                # Cold start: requires full history window to warm up memory
+                assert x_state_batch.shape[1] == self.history_horizon, (
+                    f"RNN cold start requires history_horizon ({self.history_horizon}), "
+                    f"got T={x_state_batch.shape[1]}."
+                )
+            else:
+                # Active hidden state: expect single-step autoregressive update
+                assert x_state_batch.shape[1] == 1, (
+                    f"RNN with active hidden_states expects single-step input (T=1), "
+                    f"got T={x_state_batch.shape[1]}. Call model.reset() first if starting a new sequence."
+                )
+
 
         state_means, state_stds, extensions, contacts, terminations = [], [], [], [], []
         state_base_output = self.state_base(x_state_batch, x_action_batch)
@@ -185,6 +212,8 @@ class SystemDynamicsEnsemble(nn.Module):
         termination_losses = []
 
         for i in range(self.ensemble_size):
+            self.reset() # reset rnn hidden states, otherwise hidden states leak from one head to another!
+
             if bootstrap:
                 ids = torch.randint(0, state_batch.shape[0], (state_batch.shape[0],), device=self.device)
             else:
@@ -445,12 +474,8 @@ class SystemDynamicsEnsemble(nn.Module):
 
     def reset(self):
         self.state_base.reset()
-        for head in self.state_heads:
-            head.reset()
         if self.auxiliary_base is not None:
             self.auxiliary_base.reset()
-            for head in self.auxiliary_heads:
-                head.reset()
 
     def reset_partial(self, batch_indices):
         self.state_base.reset_partial(batch_indices)

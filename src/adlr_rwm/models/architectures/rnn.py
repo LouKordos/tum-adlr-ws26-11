@@ -62,4 +62,10 @@ class Memory(nn.Module):
 
     def reset_partial(self, batch_indices):
         if self.hidden_states is not None:
-            self.hidden_states[:, batch_indices] = 0.0
+            if isinstance(self.hidden_states, tuple):
+                # LSTM tuple: (h_n, c_n)
+                self.hidden_states[0][:, batch_indices] = 0.0
+                self.hidden_states[1][:, batch_indices] = 0.0
+            else:
+                # GRU tensor: h_n
+                self.hidden_states[:, batch_indices] = 0.0
