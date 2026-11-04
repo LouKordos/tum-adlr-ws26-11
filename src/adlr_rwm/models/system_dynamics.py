@@ -1,5 +1,18 @@
 # Source: rsl_rl_rwm (https://github.com/leggedrobotics/rsl_rl_rwm)
-# TODO: adjust this to our task (check architecture and setup hydra)
+# TODO Currrent issues:
+# (1) There is some leftover logic for an RSSM backbone, including KL loss terms,
+# which now default to 0. Either remove this or implement an RSSM.
+# (2) The "sequence" prediction mode, which is diabled now by default, predicts
+# states starting from the second entry of the history horizon, not just the last state.
+# [-------H-------][----F----], H+F=T
+#      history       forecast
+# "single"   :   p(f1 | h_1, h_2, ... h_H)
+# "sequence" :   p(h_2, ...., h_H, f_1 | h_1, h_2, ... h_H )
+# An additional "sequence loss" is being calculated in this case (currently defaults to 0)
+# In theory this should givea denser gradient signal, but it'll increase the model size by a lot.
+# We should consider if this is worth integrating (the source repo doesn't)
+
+
 
 import torch
 from omegaconf import DictConfig
@@ -14,13 +27,16 @@ class SystemDynamicsEnsemble(nn.Module):
         config: DictConfig,
     ):
         super().__init__()
+        self.device = config.device
+
         self.state_dim = config.state_dim
         self.action_dim = config.action_dim
         self.extension_dim = config.extension_dim
         self.contact_dim = config.contact_dim
         self.termination_dim = config.termination_dim
-        self.device = config.device
+
         self.history_horizon = config.history_horizon
+        self.forecast_horizon = config.forecast_horizon
 
         # main NN configurations
         self.base_cfg = config.base
@@ -82,7 +98,15 @@ class SystemDynamicsEnsemble(nn.Module):
         else:
             raise ValueError("Invalid architecture type.")
 
-    def forward(self, x_state_batch, x_action_batch, model_ids=None):
+    def forward(
+                self,
+                x_state_batch: torch.Tensor,
+                x_action_batch: torch.Tensor,
+                model_ids=None
+            ):
+        x_state_batch = x_state_batch.to(self.device)
+        x_action_batch = x_action_batch.to(self.device)
+
         state_means, state_stds, extensions, contacts, terminations = [], [], [], [], []
         state_base_output = self.state_base(x_state_batch, x_action_batch)
 
@@ -202,7 +226,18 @@ class SystemDynamicsEnsemble(nn.Module):
         return state_loss, sequence_loss, bound_loss, kl_loss, extension_loss, contact_loss, termination_loss
 
     def compute_state_loss(self, head, state_batch, action_batch):
-        forecast_horizon = state_batch.shape[1] - self.history_horizon
+        assert (
+            self.forecast_horizon + self.history_horizon == state_batch.shape[1]
+            and
+            self.forecast_horizon + self.history_horizon == action_batch.shape[1]
+        ), (
+                    f"Training trajectories must be of length "
+                    f"T = History + Forecast "
+                    f"(={self.forecast_horizon + self.history_horizon}). "
+                    f"The input has: T={state_batch.shape[1]}"
+        )
+
+        forecast_horizon = self.forecast_horizon
         x_state_batch = state_batch[:, : self.history_horizon]
         state_losses = []
         sequence_losses = []
@@ -217,21 +252,24 @@ class SystemDynamicsEnsemble(nn.Module):
             else:
                 raise ValueError("Invalid state prediction type.")
 
-            if self.architecture_config["type"] in ["rnn", "rssm"] and i > 0:
+            if self.base_cfg.type in ["rnn", "rssm"] and i > 0:
                 x_action_batch = action_batch[:, self.history_horizon + i : self.history_horizon + i + 1]
                 if self.prediction_type == "sequence":
                     state_target = state_target[:, [-1]]
             else:
+                # rnn starting state is the the whole history sequence for i=0 and only the newest state later.
+                # MLP always needs the full history sequence.
                 x_action_batch = action_batch[:, i + 1 : self.history_horizon + i + 1]
 
             state_mean_pred, state_std_pred = head.forward(
                 self.state_base.forward(x_state_batch, x_action_batch), x_state_batch
             )
+
             state_loss, sequence_loss = self.compute_regression_loss(state_mean_pred, state_std_pred, state_target)
             bound_loss = self.compute_bound_loss(head) if head.output_std else torch.tensor(0.0, device=self.device)
             kl_loss = (
                 self.state_base.kl_loss
-                if self.architecture_config["type"] == "rssm"
+                if self.base_cfg.type == "rssm"
                 else torch.tensor(0.0, device=self.device)
             )
 
@@ -244,7 +282,7 @@ class SystemDynamicsEnsemble(nn.Module):
                 state_mean_pred = state_mean_pred[:, -1]
                 state_std_pred = state_std_pred[:, -1]
 
-            if self.architecture_config["type"] in ["rnn", "rssm"]:
+            if self.base_cfg.type in ["rnn", "rssm"]:
                 x_state_batch = (
                     (
                         torch.randn_like(state_mean_pred, device=self.device) * state_std_pred + state_mean_pred
@@ -274,7 +312,23 @@ class SystemDynamicsEnsemble(nn.Module):
     def compute_auxiliary_loss(
         self, head, state_batch, action_batch, extension_batch, contact_batch, termination_batch
     ):
-        forecast_horizon = state_batch.shape[1] - self.history_horizon
+        # shape checks
+        assert all(
+            self.forecast_horizon + self.history_horizon == batch.shape[1]
+            for batch in (
+                state_batch,
+                action_batch,
+                extension_batch,
+                contact_batch,
+                termination_batch,
+            ) if batch is not None
+        ), (
+            f"Training trajectories must be of length "
+            f"T = History + Forecast "
+            f"(={self.forecast_horizon + self.history_horizon})."
+        )     
+
+        forecast_horizon = self.forecast_horizon
         x_state_batch = state_batch[:, : self.history_horizon]
         extension_losses = []
         contact_losses = []
@@ -287,7 +341,7 @@ class SystemDynamicsEnsemble(nn.Module):
                 termination_batch[:, self.history_horizon + i] if termination_batch is not None else None
             )
 
-            if self.architecture_config["type"] in ["rnn", "rssm"] and i > 0:
+            if self.base_cfg.type in ["rnn", "rssm"] and i > 0:
                 x_action_batch = action_batch[:, self.history_horizon + i : self.history_horizon + i + 1]
             else:
                 x_action_batch = action_batch[:, i + 1 : self.history_horizon + i + 1]
@@ -316,7 +370,7 @@ class SystemDynamicsEnsemble(nn.Module):
             contact_losses.append(contact_loss.unsqueeze(0))
             termination_losses.append(termination_loss.unsqueeze(0))
 
-            if self.architecture_config["type"] in ["rnn", "rssm"]:
+            if self.base_cfg.type in ["rnn", "rssm"]:
                 x_state_batch = state_batch[:, self.history_horizon + i : self.history_horizon + i + 1]
             else:
                 x_state_batch = torch.cat(
@@ -409,8 +463,4 @@ class SystemDynamicsEnsemble(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        if self.freeze_auxiliary:
-            self.auxiliary_base.eval()
-            for head in self.auxiliary_heads:
-                head.eval()
         return self

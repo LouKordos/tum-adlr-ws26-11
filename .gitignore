@@ -16,3 +16,4 @@ wandb/
 *.hdf5
 .pyright/
 .vscode/
+test.py

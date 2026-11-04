@@ -2,7 +2,6 @@ import torch
 from omegaconf import DictConfig
 from torch import nn
 
-
 ACTIVATIONS = {
     "relu": nn.ReLU
 }
@@ -102,6 +101,10 @@ class MLPStateHead(nn.Module):
                 torch.zeros(1, state_dim, device=device)
             )
 
+    @property
+    def state_max_logstd(self) -> torch.Tensor:
+        return self.state_min_logstd + torch.exp(self.state_log_delta_logstd)
+
     def forward(self, x, x_state_batch):
         if x.dim() == 3:
             sequence_len = x.shape[1]
@@ -121,7 +124,7 @@ class MLPStateHead(nn.Module):
             )
 
             state_logstd = (
-                state_max_logstd
+                self.state_max_logstd
                 - nn.functional.softplus(state_max_logstd - state_logstd)
             )
 

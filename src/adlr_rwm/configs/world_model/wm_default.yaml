@@ -1,8 +1,8 @@
 ensemble_size: 5
 bootstrap: true
 
-history_horizon: 5
-forecast_horizon: 10 # TODO: integrate this in the code, this is currently inferred 
+history_horizon: 8
+forecast_horizon: 3
 
 state_dim: 10
 action_dim: 10
