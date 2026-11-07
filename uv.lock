@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
@@ -41,9 +41,11 @@ name = "adlr-rwm"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "hydra-core" },
     { name = "imgui-bundle" },
     { name = "isaaclab", extra = ["isaacsim"] },
     { name = "numpy" },
+    { name = "omegaconf" },
     { name = "torch" },
     { name = "torchvision" },
     { name = "wandb" },
@@ -57,9 +59,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "hydra-core", specifier = ">=1.4.0rc3" },
     { name = "imgui-bundle", specifier = ">=1.92.601" },
     { name = "isaaclab", extras = ["isaacsim"], specifier = "==3.0.0", index = "https://pypi.nvidia.com/" },
     { name = "numpy", specifier = ">=2" },
+    { name = "omegaconf", specifier = ">=2.4.1rc1" },
     { name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "wandb", specifier = ">=0.31.0" },
@@ -1580,7 +1584,7 @@ source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
     { name = "isaacsim-robot-motion" },
     { name = "isaacsim-sensor" },
-    { name = "onnxruntime" },
+    { name = "onnxruntime-gpu" },
     { name = "py-trees" },
     { name = "pydot" },
     { name = "pyparsing" },
@@ -2392,7 +2396,7 @@ wheels = [
 ]
 
 [[package]]
-name = "onnxruntime"
+name = "onnxruntime-gpu"
 version = "1.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
@@ -2402,7 +2406,7 @@ dependencies = [
     { name = "protobuf" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/43/2a4e04f8dbeffad19bbcced4bcd4289bf478921518437404d6b92bdf213b/onnxruntime-1.26.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9b6dd70599005bd1bf29779f04a91978b92b5e719c11a20068a8f8e535f725b6", size = 18185439, upload-time = "2026-05-08T19:07:36.299Z" },
+    { url = "https://files.pythonhosted.org/packages/94/fd/59bee7cffaa435da44fefdeb63e29c61de4dbfa4b279852f59cd02c042ae/onnxruntime_gpu-1.26.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3c01119ed4d9449d60367fa8ccffcd02bd3fe736754284e4b198d131f54edad6", size = 276971796, upload-time = "2026-05-08T19:15:46.192Z" },
 ]
 
 [[package]]
