@@ -90,6 +90,8 @@ class MLPStateHead(nn.Module):
     def state_max_logstd(self) -> torch.Tensor:
         return self.state_min_logstd + torch.exp(self.state_log_delta_logstd)
 
+    # x is the hidden state of the GRU, x_state_batch is used because model predicts residuals
+    # so we need the original state to get the next state
     def forward(self, x, x_state_batch):
         if x.dim() == 3:
             sequence_len = x.shape[1]

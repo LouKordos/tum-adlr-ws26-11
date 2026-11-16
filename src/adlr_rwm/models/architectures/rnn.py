@@ -46,7 +46,7 @@ class Memory(nn.Module):
 
     def forward(self, x):
         x, self.hidden_states = self.rnn(x, self.hidden_states)
-        return x[:, -1]
+        return x[:, -1]  # Returns only hidden state
 
     def reset(self):
         self.hidden_states = None
@@ -55,8 +55,10 @@ class Memory(nn.Module):
         if self.hidden_states is not None:
             if isinstance(self.hidden_states, tuple):
                 # LSTM tuple: (h_n, c_n)
+                # Indexing for hidden states does NOT follow batch_first!
                 self.hidden_states[0][:, batch_indices] = 0.0
                 self.hidden_states[1][:, batch_indices] = 0.0
             else:
                 # GRU tensor: h_n
+                # Indexing for hidden states does NOT follow batch_first!
                 self.hidden_states[:, batch_indices] = 0.0
