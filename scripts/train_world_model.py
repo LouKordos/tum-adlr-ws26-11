@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 import h5py
@@ -54,11 +56,17 @@ def main(cfg: DictConfig) -> None:
         # state_dim/action_dim are not in the YAML because they depend on the recorded fields
         wm.state_dim = train_set.state_dim
         wm.action_dim = train_set.action_dim
+        tr.split.recording = recording.name
+        tr.split.num_episodes = {name: len(ids) for name, ids in split.items()}
+        tr.split.num_windows = {name: len(dataset) for name, dataset in datasets.items()}
+        tr.split.fingerprint = hashlib.sha256(json.dumps(split, sort_keys=True).encode()).hexdigest()[:12]
 
     # Hydra writes .hydra/config.yaml before main() runs, so that copy lacks the inferred values.
     # This one is the complete config of the run.
     run_dir = Path(HydraConfig.get().runtime.output_dir)
     OmegaConf.save(cfg, run_dir / "config.yaml", resolve=True)
+    split_file = run_dir / "split.json"
+    split_file.write_text(json.dumps(split, indent=1) + "\n")
 
     wb = tr.logging.wandb
     run = wandb.init(
@@ -71,9 +79,15 @@ def main(cfg: DictConfig) -> None:
         # None: online, unless the WANDB_MODE env var says otherwise (e.g. offline on the cluster)
         mode=None if wb.enabled else "disabled",
     )
+    # Versioned file in wandb: runs with the same split share one artifact version (wandb dedupes by content)
+    split_artifact = wandb.Artifact(
+        f"split-{recording.stem}", type="split", metadata={"fingerprint": tr.split.fingerprint}
+    )
+    split_artifact.add_file(str(split_file))
+    run.log_artifact(split_artifact)
 
     model = SystemDynamicsEnsemble(wm)
-    print(f"state_dim={wm.state_dim} action_dim={wm.action_dim} windows={ {n: len(d) for n, d in datasets.items()} }")
+    print(f"state_dim={wm.state_dim} action_dim={wm.action_dim} split={OmegaConf.to_container(tr.split)}")
     print(f"run_dir={run_dir}")
 
     # TODO: dataloaders (only train shuffles), optimizer, training loop, validation, test, checkpoints
