@@ -299,7 +299,7 @@ def main():
 
     # Record the initial state, the actions and the states after every step of every episode (successful or not).
     # The recorder is enabled here and not in RecordedLiftEnvCfg, because PPO training uses the same task and must not
-    # write a dataset (that's why it is commented out there).
+    # write a dataset.
     env_cfg.recorders = ActionStateRecorderManagerCfg(
         dataset_compression=True,
         dataset_export_mode=DatasetExportMode.EXPORT_ALL,
