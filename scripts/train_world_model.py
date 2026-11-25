@@ -231,7 +231,9 @@ def main(cfg: DictConfig) -> None:
             optimizer.step()
             step += 1
 
-            logged = {"loss": loss, "grad_norm": grad_norm} | {f"{name}_loss": terms[name] for name in loss_weights}
+            clipped = (grad_norm > max_grad_norm).float()  # averaged over the log window = share of clipped steps
+            logged = {"loss": loss, "grad_norm": grad_norm, "clip_fraction": clipped}
+            logged |= {f"{name}_loss": terms[name] for name in loss_weights}
             for name, value in logged.items():
                 window[name] += value.detach()  # stays on the GPU: no CPU/GPU sync per step
             window_steps += 1
@@ -252,7 +254,7 @@ def main(cfg: DictConfig) -> None:
                 terms = " ".join(f"{k[:-5]} {v:.4g}" for k, v in metrics.items() if k.endswith("_loss"))
                 log.info(
                     f"seed {cfg.seed} | epoch {epoch}/{tr.num_epochs} [{i}/{steps_per_epoch}] step {step} | loss {metrics['loss']:.4g} "
-                    f"({terms}) | grad {metrics['grad_norm']:.3g} | lr {metrics['lr']:.2e} | {rate:.1f} it/s, "
+                    f"({terms}) | grad {metrics['grad_norm']:.3g} ({metrics['clip_fraction']:.0%} clipped) | lr {metrics['lr']:.2e} | {rate:.1f} it/s, "
                     f"data wait {metrics['data_wait_fraction']:.0%} | eta epoch {hms((steps_per_epoch - i) / rate)}, "
                     f"total {hms(remaining / rate)}"
                 )
