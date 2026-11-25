@@ -3,9 +3,11 @@
 
 set positional-arguments
 
-# Seeds for train-seeds, override with `uv run just seeds=0,1,2 train-seeds`
+# Seeds that `train` runs, e.g. `uv run just seeds=0 train` for a single run
 seeds := "0,1,2,3,4"
-# wandb group of a train-seeds sweep (wandb shows mean/std per group), override with `uv run just group=nll train-seeds`
+# How many seeds train at the same time, e.g. `uv run just parallel=3 train` (each needs its own GPU memory and RAM)
+parallel := "1"
+# wandb group of the runs (wandb shows mean/std per group), also the output folder outputs/<group>/seed_<seed>
 group := "seeds_" + datetime("%Y-%m-%d_%H-%M-%S")
 
 default:
@@ -15,10 +17,7 @@ default:
 collect *args:
     uv run python scripts/environments/state_machine/collect.py --num_envs 512 --num_episodes 20000 --disable_fabric --viz none "$@"
 
-# Train the world model once
+# Train the world model once per seed, `parallel` seeds at a time
 train *overrides:
-    uv run python scripts/train_world_model.py "$@"
-
-# Train once per seed (Hydra multirun, one after another), all runs in one wandb group
-train-seeds *overrides:
-    uv run python scripts/train_world_model.py --multirun seed={{seeds}} world_model.training.logging.wandb.group={{group}} "$@"
+    echo {{seeds}} | tr , '\n' | xargs -P {{parallel}} -I SEED uv run python scripts/train_world_model.py \
+        seed=SEED hydra.run.dir=outputs/{{group}}/seed_SEED world_model.training.logging.wandb.group={{group}} "$@"
