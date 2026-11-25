@@ -152,8 +152,7 @@ class RWMDataset(Dataset):
                     ep_idx = len(episodes)
                     episodes.append(_Episode(file_idx, demo, num_samples, success))
                     windows.extend(
-                        (ep_idx, start)
-                        for start in range(0, num_samples - self.sequence_length + 1, self.stride)
+                        (ep_idx, start) for start in range(0, num_samples - self.sequence_length + 1, self.stride)
                     )
 
         self.state_dim = state_dim or 0
@@ -163,9 +162,9 @@ class RWMDataset(Dataset):
     def _read_field(self, group: h5py.Group, field: str) -> Tensor:
         """Read one dataset field as float32 and keep consecutive quaternions sign-consistent."""
         array = np.asarray(group[field][:], dtype=np.float32)
-        sl = self.quaternion_slices.get(field)
-        if sl is not None and array.shape[-1] >= sl.stop and len(array) >= 2:
-            quat = array[:, sl]
+        quat_slice = self.quaternion_slices.get(field)
+        if quat_slice is not None and array.shape[-1] >= quat_slice.stop and len(array) >= 2:
+            quat = array[:, quat_slice]
             flips = np.cumprod(np.where(np.sum(quat[1:] * quat[:-1], axis=-1) < 0.0, -1.0, 1.0))
             quat[1:] *= flips[:, None]
         return torch.from_numpy(array)
@@ -173,12 +172,14 @@ class RWMDataset(Dataset):
     def _load_episode(self, ep_idx: int) -> tuple[Tensor, Tensor]:
         """Fetch concatenated ``(state, action)`` tensors for ``ep_idx`` from LRU cache or disk."""
         cached = self._episode_cache.get(ep_idx)
+        # Caches episode for faster access without fs read
         if cached is not None:
             self._episode_cache.move_to_end(ep_idx)
             return cached
 
         ep = self._episodes[ep_idx]
         handle = self._handles.get(ep.file_idx)
+        # Caches handle for faster access without lookup
         if handle is None:
             handle = h5py.File(self._files[ep.file_idx], "r")
             self._handles[ep.file_idx] = handle
@@ -188,6 +189,7 @@ class RWMDataset(Dataset):
         action = self._read_field(group, self.action_field)
 
         pair = (state, action)
+        # LRU cache logic
         self._episode_cache[ep_idx] = pair
         if self.max_cached_episodes is not None and len(self._episode_cache) > self.max_cached_episodes:
             self._episode_cache.popitem(last=False)
