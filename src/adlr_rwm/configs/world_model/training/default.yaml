@@ -12,6 +12,10 @@ split:
   test_fraction: 0.1
   seed: 0                     # separate from the training seed: changing the training seed keeps the same split
 
+# States and actions are normalized per dimension, (x - mean) / std, with train split stats saved in every checkpoint
+normalization:
+  min_std: 1.0e-3             # floor for near-constant dimensions
+
 # Kwargs for adlr_rwm.data.make_dataloader (appled to train only because val uses shuffle=false).
 dataloader:
   batch_size: 1024
@@ -23,6 +27,7 @@ dataloader:
   prefetch_factor: 2
 
 num_epochs: 100
+limit_batches: null           # cap batches per epoch and per evaluation, for quick tests (null = all)
 
 optimizer:
   type: adam                  # adam | adamw
@@ -53,15 +58,18 @@ loss:
 logging:
   log_interval: 50            # optimizer steps
   eval_interval: 1            # epochs
+  watch_interval: 1000        # gradient histograms in wandb every N steps (0 = off)
   wandb:
     enabled: true             # WANDB_MODE=offline (e.g. on the cluster) still logs locally; sync later with `wandb sync`
     project: adlr-rwm
     entity: null
     # Same timestamp as Hydra's run directory (outputs/<date>/<time>), plus the settings you compare most often
-    run_name: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${world_model.base.type}_${world_model.training.loss.type}
+    run_name: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${world_model.base.type}_${world_model.training.loss.type}_s${seed}
+    group: null               # same group for runs that only differ in the seed -> wandb shows mean/std
     tags: []
 
+# Saved in the run directory (outputs/<date>/<time>) next to config.yaml and split.json
 checkpoint:
-  dir: checkpoints/world_model
-  interval: 10                # epochs
-  keep_best: true             # also keep the checkpoint with the lowest val state loss
+  interval: 10                # epochs, in addition to last.pt
+  keep_best: true             # also keep best.pt, the checkpoint with the lowest val `best_metric`
+  best_metric: mse            # forecast MSE (comparable across loss types), or state_loss (the configured loss)
