@@ -1,7 +1,8 @@
 ensemble_size: 5
 
-history_horizon: 16  # input steps (states + actions) the model sees
-forecast_horizon: 8  # autoregressive prediction steps in training and evaluation
+# Recordings are at 50 Hz (sim dt 0.01 s x decimation 2), so 32 steps = 0.64 s
+history_horizon: 32  # input steps (states + actions) the model sees
+forecast_horizon: 32  # autoregressive prediction steps in training and evaluation
 
 # state_dim and action_dim are NOT set here because scripts/train_world_model.py infers them from the dataset and adds
 # them to this config (world_model.state_dim / world_model.action_dim) before the config is saved and sent to wandb.
