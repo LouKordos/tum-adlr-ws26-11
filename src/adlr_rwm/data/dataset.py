@@ -85,6 +85,7 @@ class RWMDataset(Dataset):
         self._files = self._discover_files()
         self.reset_worker()
 
+        # The first element in each window tuple is an index into self._episodes (not the HDF5 file index)
         self._episodes, self._windows = self._build_index()
         if not self._windows:
             raise ValueError(
