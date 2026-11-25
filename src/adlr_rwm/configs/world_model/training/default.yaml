@@ -50,10 +50,11 @@ logging:
   log_interval: 50            # optimizer steps
   eval_interval: 1            # epochs
   wandb:
-    enabled: false
+    enabled: true             # WANDB_MODE=offline (e.g. on the cluster) still logs locally; sync later with `wandb sync`
     project: adlr-rwm
     entity: null
-    run_name: null            # null means auto-generated
+    # Same timestamp as Hydra's run directory (outputs/<date>/<time>), plus the settings you compare most often
+    run_name: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${world_model.base.type}_${world_model.training.loss.type}
     tags: []
 
 checkpoint:

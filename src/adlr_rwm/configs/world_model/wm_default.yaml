@@ -3,15 +3,15 @@ ensemble_size: 5
 history_horizon: 8
 forecast_horizon: 3
 
-state_dim: 10
-action_dim: 10
+# state_dim and action_dim are NOT set here because scripts/train_world_model.py infers them from the dataset and adds
+# them to this config (world_model.state_dim / world_model.action_dim) before the config is saved and sent to wandb.
 
 # auxiliary predictions
 extension_dim: 0
 contact_dim: 0
 termination_dim: 0
 
-device: ${device}  # follows the top-level `device`, so `device=cpu` switches everything
+device: ${device}  # follows the top-level `device`
 
 defaults:
   - base: rnn
