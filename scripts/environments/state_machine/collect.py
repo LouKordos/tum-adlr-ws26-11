@@ -73,6 +73,8 @@ import isaaclab_tasks  # noqa: F401
 import torch
 import warp as wp
 from isaaclab.assets.rigid_object.rigid_object_data import RigidObjectData
+from isaaclab.envs.mdp.recorders import ActionStateRecorderManagerCfg
+from isaaclab.managers.recorder_manager import DatasetExportMode
 from isaaclab.utils import index_fill_
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
@@ -291,6 +293,13 @@ def main():
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     dataset_filename = f"franka_lift_scripted_envs{env_cfg.scene.num_envs}_{timestamp}"
 
+    # Record the initial state, the actions and the states after every step of every episode (successful or not).
+    # The recorder is enabled here and not in RecordedLiftEnvCfg, because PPO training uses the same task and must not
+    # write a dataset (that's why it is commented out there).
+    env_cfg.recorders = ActionStateRecorderManagerCfg(
+        dataset_compression=True,
+        dataset_export_mode=DatasetExportMode.EXPORT_ALL,
+    )
     recorders_cfg = env_cfg.recorders
     recorders_cfg.dataset_export_dir_path = str(dataset_dir)
     recorders_cfg.dataset_filename = dataset_filename
