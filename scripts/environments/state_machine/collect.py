@@ -287,6 +287,10 @@ def main():
         use_fabric=not args_cli.disable_fabric,
         overrides=hydra_overrides,
     )
+    # The recorder stores env_cfg.env_name in the dataset (data.attrs["env_args"]["env_name"]), so tools like
+    # scripts/visualize_world_model.py know which task to play the episodes back in. Isaac Lab's record_demos.py does
+    # the same; without this line the name is saved as "".
+    env_cfg.env_name = TASK_NAME
 
     dataset_dir = args_cli.dataset_dir.expanduser().resolve()
     dataset_dir.mkdir(parents=True, exist_ok=True)
