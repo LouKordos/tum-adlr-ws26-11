@@ -11,7 +11,7 @@ extension_dim: 0
 contact_dim: 0
 termination_dim: 0
 
-device: cuda
+device: ${device}  # follows the top-level `device`, so `device=cpu` switches everything
 
 defaults:
   - base: rnn
