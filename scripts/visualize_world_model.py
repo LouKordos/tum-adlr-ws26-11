@@ -13,7 +13,7 @@ How it works
    statistics and the full training config. Its run directory also contains split.json (the train/val/test episode
    lists). The config names the recording (.hdf5) the model was trained on, and the recording names the Isaac Lab task
    it was recorded in. That is why --checkpoint is the only required argument.
-2. For every selected episode, the world model predicts the states from the recorded actions (see "Predictions").
+2. For every selected episode, the world model predicts the states from the recorded actions (see "Prediction modes").
 3. We create the task's environment with 2 copies ("envs"): env 0 shows the recorded states, env 1 the predicted
    states. Nothing is simulated: every frame we write both states directly into the simulator (like replaying motion
    capture) and render one image. Physics would only get in the way here, because the prediction should be shown
@@ -21,27 +21,34 @@ How it works
 4. The Newton GL visualizer (OpenGL, so it works without an RTX GPU) renders the frames, and ffmpeg turns them into
    one mp4 per episode.
 
-Predictions
------------
+Prediction modes (--mode)
+-------------------------
 H = history_horizon, F = forecast_horizon of the checkpoint (both are read from the checkpoint's config).
-The ghost shows what the model is trained and evaluated on. Every F steps the ghost is reset to the recording: the
-model gets the last H recorded steps as history and predicts the next F steps on its own. You see the error grow
-within each chunk and jump back to zero at the start of the next one.
-The first H steps of an episode have no prediction (they are the history), so the ghost equals the recording there.
+* chunked (default): what the model is trained and evaluated on. Every F steps the ghost is reset to the recording:
+  the model gets the last H recorded steps as history and predicts the next F steps on its own. You see the error
+  grow within each chunk and jump back to zero at the start of the next one.
+* free: the model gets the first H recorded steps once and then predicts the whole rest of the episode on its own
+  (it only receives the recorded actions). Shows how errors compound over long horizons, which is what a policy that
+  is trained inside the world model will experience.
+In both modes the first H steps of an episode have no prediction (they are the history), so the ghost equals the
+recording there.
 
 Examples
 --------
-    # 4 random test episodes with the ghost
+    # 4 random test episodes, chunked predictions
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt
 
-    # Two specific episodes, only the recording
+    # Free-running predictions for two specific episodes
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt \
-        --no-ghost --episodes demo_12 demo_345
+        --mode free --episodes demo_12 demo_345
+
+    # Only the recording, no ghost
+    uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --no-ghost
 
     # Watch it live in the viewer window while the videos are written
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --window
 
-Videos are written to <run dir>/videos/<checkpoint>_ghost/ or <checkpoint>_recording/ (inside outputs/, which git
+Videos are written to <run dir>/videos/<checkpoint>_<mode>/ or <checkpoint>_recording/ (inside outputs/, which git
 ignores).
 Recordings made before collect.py stored the task name need --task, e.g. --task ADLR-Lift-Cube-Franka-IK-Abs.
 
@@ -75,6 +82,9 @@ parser.add_argument(
 )
 parser.add_argument("--num_episodes", type=int, default=4, help="Number of random episodes (default: 4).")
 parser.add_argument("--seed", type=int, default=0, help="Seed for picking the random episodes (default: 0).")
+parser.add_argument(
+    "--mode", choices=("chunked", "free"), default="chunked", help="Prediction mode, see the module docstring."
+)
 parser.add_argument(
     "--ghost",
     action=argparse.BooleanOptionalAction,
@@ -255,13 +265,14 @@ def rollout(model: SystemDynamicsEnsemble, states: torch.Tensor, actions: torch.
 
 
 def predict_episode(
-    model: SystemDynamicsEnsemble, stats: dict, states: torch.Tensor, actions: torch.Tensor
+    model: SystemDynamicsEnsemble, stats: dict, states: torch.Tensor, actions: torch.Tensor, mode: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Predicted state for every row of one episode, in physical units (not normalized).
 
     Args:
         states: [T, state_dim] recorded states of the episode (as the dataset gives them to the model in training).
         actions: [T, action_dim] recorded actions.
+        mode: "chunked" or "free", see the module docstring.
 
     Returns:
         predicted: [T, state_dim]. Rows without a prediction (the first H rows) are copies of the recorded states.
@@ -275,9 +286,9 @@ def predict_episode(
     states_n = (states.to(device) - stats["state"][0]) / stats["state"][1]
     actions_n = (actions.to(device) - stats["action"][0]) / stats["action"][1]
 
-    # Every prediction window starts after H recorded steps of history: a new window every F steps, each predicts
-    # F steps (see "Predictions" in the module docstring)
-    starts, steps = list(range(H, T, F)), F
+    # Every prediction window starts after H recorded steps of history.
+    # chunked: a new window every F steps, each predicts F steps. free: one window that predicts the rest.
+    starts, steps = (list(range(H, T, F)), F) if mode == "chunked" else ([H], T - H)
 
     # The last chunk can reach past the end of the episode, but the model wants `steps` actions for every window.
     # Repeat the last action as padding: a prediction only depends on actions up to its own row, so the padding only
@@ -539,7 +550,7 @@ def main() -> None:
             style_ghost_env(visualizer, env, ghost_assets)
 
         fps = args_cli.fps or 1.0 / env.step_dt  # step_dt = sim dt x decimation = time between recorded rows
-        name = f"{checkpoint_path.stem}_" + ("ghost" if args_cli.ghost else "recording")
+        name = f"{checkpoint_path.stem}_" + (args_cli.mode if args_cli.ghost else "recording")
         output_dir = args_cli.output_dir or run_dir / "videos" / name
         output_dir.mkdir(parents=True, exist_ok=True)
         episode_index = {f"{recording.name}:{ep.demo}": i for i, ep in enumerate(dataset._episodes)}
@@ -560,7 +571,7 @@ def main() -> None:
                     # Model inputs, preprocessed like in training (_load_episode is internal to RWMDataset, but it
                     # is exactly the code path training uses, so the inputs can't silently differ)
                     states, actions = dataset._load_episode(episode_index[episode_id])
-                    predicted, has_prediction = predict_episode(model, stats, states, actions)
+                    predicted, has_prediction = predict_episode(model, stats, states, actions, args_cli.mode)
                     env_states = stack_envs(recorded, ghost_states(recorded, predicted, state_fields, dataset))
                     errors = prediction_errors(predicted, states, has_prediction, recorded, state_fields)
                     print(f"[INFO] {in_split} {demo} ({outcome}, {info.length} steps) | prediction RMSE: {errors}")
