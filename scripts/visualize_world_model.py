@@ -1,8 +1,11 @@
-"""Play back recorded episodes in Isaac Lab and write one video per episode.
+"""Play back recorded episodes in Isaac Lab and overlay the world model's predictions as a transparent "ghost".
 
 What the video shows
 --------------------
-* The recorded episode (ground truth), exactly as it was recorded.
+* Solid robot + cube: the recorded episode (ground truth), exactly as it was recorded.
+* Transparent, tinted robot + cube (the "ghost"): what the world model predicts for the same time step.
+  If the model were perfect, the ghost would stay hidden inside the solid robot and cube the whole time.
+  --no-ghost turns it off and only plays back the recording.
 
 How it works
 ------------
@@ -10,23 +13,36 @@ How it works
    statistics and the full training config. Its run directory also contains split.json (the train/val/test episode
    lists). The config names the recording (.hdf5) the model was trained on, and the recording names the Isaac Lab task
    it was recorded in. That is why --checkpoint is the only required argument.
-2. We create the task's environment. Nothing is simulated: every frame we write the recorded state directly into the
-   simulator (like replaying motion capture) and render one image.
-3. The Newton GL visualizer (OpenGL, so it works without an RTX GPU) renders the frames, and ffmpeg turns them into
+2. For every selected episode, the world model predicts the states from the recorded actions (see "Predictions").
+3. We create the task's environment with 2 copies ("envs"): env 0 shows the recorded states, env 1 the predicted
+   states. Nothing is simulated: every frame we write both states directly into the simulator (like replaying motion
+   capture) and render one image. Physics would only get in the way here, because the prediction should be shown
+   exactly as predicted, even if it is physically impossible (e.g. a floating cube).
+4. The Newton GL visualizer (OpenGL, so it works without an RTX GPU) renders the frames, and ffmpeg turns them into
    one mp4 per episode.
+
+Predictions
+-----------
+H = history_horizon, F = forecast_horizon of the checkpoint (both are read from the checkpoint's config).
+The ghost shows what the model is trained and evaluated on. Every F steps the ghost is reset to the recording: the
+model gets the last H recorded steps as history and predicts the next F steps on its own. You see the error grow
+within each chunk and jump back to zero at the start of the next one.
+The first H steps of an episode have no prediction (they are the history), so the ghost equals the recording there.
 
 Examples
 --------
-    # 4 random test episodes
+    # 4 random test episodes with the ghost
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt
 
-    # Two specific episodes
-    uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --episodes demo_12 demo_345
+    # Two specific episodes, only the recording
+    uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt \
+        --no-ghost --episodes demo_12 demo_345
 
     # Watch it live in the viewer window while the videos are written
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --window
 
-Videos are written to <run dir>/videos/<checkpoint>_recording/ (inside outputs/, which git ignores).
+Videos are written to <run dir>/videos/<checkpoint>_ghost/ or <checkpoint>_recording/ (inside outputs/, which git
+ignores).
 Recordings made before collect.py stored the task name need --task, e.g. --task ADLR-Lift-Cube-Franka-IK-Abs.
 
 This script is deliberately self-contained: its settings are the command line flags below, not the Hydra configs in
@@ -41,7 +57,7 @@ from isaaclab.app import add_launcher_args, launch_simulation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-parser = argparse.ArgumentParser(description="Play back recorded episodes in Isaac Lab and write videos.")
+parser = argparse.ArgumentParser(description="Overlay world model predictions on recorded episodes in Isaac Lab.")
 parser.add_argument(
     "--checkpoint", type=Path, required=True, help="World model checkpoint (.pt) written by train_world_model.py."
 )
@@ -59,6 +75,16 @@ parser.add_argument(
 )
 parser.add_argument("--num_episodes", type=int, default=4, help="Number of random episodes (default: 4).")
 parser.add_argument("--seed", type=int, default=0, help="Seed for picking the random episodes (default: 0).")
+parser.add_argument(
+    "--ghost",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Show the model's prediction as a ghost (default). --no-ghost only plays back the recording.",
+)
+parser.add_argument("--ghost_opacity", type=float, default=0.5, help="Ghost opacity (0-1).")
+parser.add_argument(
+    "--ghost_color", type=float, nargs=3, default=(0.15, 0.55, 1.0), help="Ghost RGB tint in [0, 1] (default: blue)."
+)
 parser.add_argument(
     "--fps", type=float, default=None, help="Video frame rate. Default: real time (one frame per recorded step)."
 )
@@ -90,6 +116,7 @@ if not args_cli.window:
 
 import json
 import random
+import re
 import subprocess
 
 import gymnasium as gym
@@ -99,8 +126,15 @@ import numpy as np
 import torch
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
+from omegaconf import OmegaConf
 
 import adlr_rwm.tasks  # noqa: F401  (registers our tasks, e.g. ADLR-Lift-Cube-Franka-IK-Abs, with gym)
+from adlr_rwm.data import RWMDataset
+from adlr_rwm.models import SystemDynamicsEnsemble
+
+# Index of the env that shows the recording and of the env that shows the prediction ("ghost")
+RECORDED_ENV = 0
+GHOST_ENV = 1
 
 # Camera: eye and lookat in [m], focal length of the lens in [mm] (Isaac Lab's default of 12 mm is very wide-angle and
 # makes the robot tiny). The robot base is at the env origin and the robot faces +x; the table top is at z = 0 and the
@@ -111,6 +145,30 @@ CAMERA = {"eye": (1.9, -1.5, 1.0), "lookat": (0.35, 0.0, 0.35), "focal_length": 
 # --------------------------------------------------------------------------------------------------------------------
 # Loading the checkpoint, the recording and the episodes
 # --------------------------------------------------------------------------------------------------------------------
+
+
+def load_world_model(checkpoint: dict, device: str) -> tuple[SystemDynamicsEnsemble, dict[str, tuple]]:
+    """Rebuild the world model from a checkpoint and return it with its normalization statistics.
+
+    The checkpoint stores the complete training config, so the model is built with exactly the same architecture,
+    horizons and state/action dimensions it was trained with.
+    """
+    wm_cfg = OmegaConf.create(checkpoint["config"]["world_model"])
+    wm_cfg.device = device  # the saved config says "cuda"; follow --device instead
+    model = SystemDynamicsEnsemble(wm_cfg)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()  # no dropout/batchnorm in the model today, but this is the correct mode for inference anyway
+
+    # The model only understands normalized inputs: (x - mean) / std with the train split's statistics.
+    norm = checkpoint["normalization"]
+    if "state" in norm:
+        # Current format of train_world_model.py: {"state": (mean, std), "action": (mean, std)}
+        stats = {key: (mean, std) for key, (mean, std) in norm.items()}
+    else:
+        # Older checkpoints stored flat keys: {"state_mean": ..., "state_std": ..., "action_mean": ..., ...}
+        stats = {key: (norm[f"{key}_mean"], norm[f"{key}_std"]) for key in ("state", "action")}
+    stats = {key: (mean.to(device), std.to(device)) for key, (mean, std) in stats.items()}
+    return model, stats
 
 
 def find_recording(checkpoint: dict) -> Path:
@@ -155,13 +213,146 @@ def read_recorded_states(episode: h5py.Group) -> dict[str, dict[str, dict[str, t
 
 
 # --------------------------------------------------------------------------------------------------------------------
+# World model predictions
+# --------------------------------------------------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def rollout(model: SystemDynamicsEnsemble, states: torch.Tensor, actions: torch.Tensor, steps: int) -> torch.Tensor:
+    """Open-loop prediction of `steps` states after a history of H recorded states, for a batch of windows.
+
+    This is SystemDynamicsEnsemble.forecast() with a free number of steps instead of always forecast_horizon (a copy,
+    so the training code stays untouched). Same indexing, so the predictions are exactly what evaluation measures:
+    * states:  [B, H, state_dim] normalized, the recorded history
+    * actions: [B, H + steps, action_dim] normalized. actions[k] is the action that leads to states[k], which is how
+      Isaac Lab records them, so action H + i is the one that produces predicted step i.
+    * returns: [B, steps, state_dim] normalized predictions (ensemble mean), i.e. rows H .. H + steps - 1 of the
+      window. Each prediction is fed back as the input for the next step ("autoregressive").
+    """
+    H = model.history_horizon
+    recurrent = model.base_cfg.type in ("rnn", "rssm")
+    model.reset()  # clear the RNN memory, otherwise it leaks in from the previous call
+    x_state = states
+    predictions = []
+    for i in range(steps):
+        if recurrent and i > 0:
+            # The RNN remembers the history in its hidden state, so after the first step it only needs the newest
+            # state (x_state, the previous prediction) and the action that leads to the next state
+            x_action = actions[:, H + i : H + i + 1]
+        else:
+            # First step of the RNN, or every step of the MLP: the whole H-step window. Each state is paired with the
+            # action that follows it (states[k] with actions[k + 1]), hence the offset of 1.
+            x_action = actions[:, i + 1 : H + i + 1]
+        mean, *_ = model(x_state, x_action)  # forward() returns (ensemble mean, aleatoric, epistemic, aux...)
+        predictions.append(mean)
+        if recurrent:
+            x_state = mean.unsqueeze(1)
+        else:
+            # The MLP's window slides: drop the oldest state, append the prediction
+            x_state = torch.cat([x_state[:, 1:], mean.unsqueeze(1)], dim=1)
+    model.reset()
+    return torch.stack(predictions, dim=1)
+
+
+def predict_episode(
+    model: SystemDynamicsEnsemble, stats: dict, states: torch.Tensor, actions: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Predicted state for every row of one episode, in physical units (not normalized).
+
+    Args:
+        states: [T, state_dim] recorded states of the episode (as the dataset gives them to the model in training).
+        actions: [T, action_dim] recorded actions.
+
+    Returns:
+        predicted: [T, state_dim]. Rows without a prediction (the first H rows) are copies of the recorded states.
+        has_prediction: [T] bool, which rows were predicted.
+    """
+    H, F = model.history_horizon, model.forecast_horizon
+    T = len(states)
+    device = stats["state"][0].device
+
+    # Normalize the inputs exactly like train_world_model.py does
+    states_n = (states.to(device) - stats["state"][0]) / stats["state"][1]
+    actions_n = (actions.to(device) - stats["action"][0]) / stats["action"][1]
+
+    # Every prediction window starts after H recorded steps of history: a new window every F steps, each predicts
+    # F steps (see "Predictions" in the module docstring)
+    starts, steps = list(range(H, T, F)), F
+
+    # The last chunk can reach past the end of the episode, but the model wants `steps` actions for every window.
+    # Repeat the last action as padding: a prediction only depends on actions up to its own row, so the padding only
+    # affects predictions past the episode end, which are thrown away below.
+    actions_n = torch.cat([actions_n, actions_n[-1:].expand(steps, -1)])
+
+    # Batch all windows of the episode into one call: [num_windows, H, state_dim] and [num_windows, H + steps, ...]
+    state_windows = torch.stack([states_n[start - H : start] for start in starts])
+    action_windows = torch.stack([actions_n[start - H : start + steps] for start in starts])
+    predictions = rollout(model, state_windows, action_windows, steps)
+
+    # Undo the normalization and write every window's predictions into its rows of the episode
+    predictions = predictions * stats["state"][1] + stats["state"][0]
+    predicted = states.clone()
+    has_prediction = torch.zeros(T, dtype=torch.bool)
+    for start, window in zip(starts, predictions.cpu()):
+        n = min(steps, T - start)  # drop the predictions past the episode end
+        predicted[start : start + n] = window[:n]
+        has_prediction[start : start + n] = True
+    return predicted, has_prediction
+
+
+def ghost_states(
+    recorded: dict, predicted: torch.Tensor, state_fields: tuple[str, ...], dataset: RWMDataset
+) -> dict[str, dict[str, dict[str, torch.Tensor]]]:
+    """Scene state for the ghost env: the recorded scene state with every predicted quantity replaced.
+
+    The world model's state vector is the concatenation of the dataset's state fields, e.g.
+    states/articulation/robot/joint_position (9) | .../joint_velocity (9) | states/rigid_object/object/root_pose (7) | ...
+    Each field name is also its place in the scene state dict, so we cut the vector back into fields and put each one
+    where it came from. This works for any environment, as long as the state fields are recorded scene states.
+    Everything the model doesn't predict (e.g. the robot base pose) stays as recorded.
+    """
+    # New nested dicts (the tensors are replaced, never modified, so the recorded states stay untouched)
+    ghost = {kind: {name: dict(asset) for name, asset in assets.items()} for kind, assets in recorded.items()}
+    offset = 0
+    for field in state_fields:
+        prefix, asset_type, asset_name, quantity = field.split("/")
+        assert prefix == "states", f"Can only show recorded scene states, got state field {field}"
+        dim = recorded[asset_type][asset_name][quantity].shape[-1]
+        value = predicted[:, offset : offset + dim].clone()
+        offset += dim
+        # A predicted quaternion is not exactly unit length; the simulator wants unit quaternions
+        quat_slice = dataset.quaternion_slices.get(field)
+        if quat_slice is not None:
+            value[:, quat_slice] = torch.nn.functional.normalize(value[:, quat_slice], dim=-1)
+        ghost[asset_type][asset_name][quantity] = value
+    return ghost
+
+
+def prediction_errors(
+    predicted: torch.Tensor, states: torch.Tensor, has_prediction: torch.Tensor, recorded: dict, state_fields
+) -> str:
+    """Root mean squared error per state field over the predicted rows, in physical units (rad, m, ...).
+
+    Printed per episode to help pick out interesting videos; the proper metrics are the ones logged during training.
+    """
+    errors = (predicted - states)[has_prediction]
+    parts, offset = [], 0
+    for field in state_fields:
+        _, asset_type, asset_name, quantity = field.split("/")
+        dim = recorded[asset_type][asset_name][quantity].shape[-1]  # size of this field in the state vector
+        parts.append(f"{asset_name}/{quantity} {errors[:, offset : offset + dim].square().mean().sqrt():.4f}")
+        offset += dim
+    return ", ".join(parts)
+
+
+# --------------------------------------------------------------------------------------------------------------------
 # Scene states over time
 # --------------------------------------------------------------------------------------------------------------------
 
 
 def stack_envs(*env_states: dict) -> dict:
     """Combine the states of several envs into one state for all of them: tensors [T, num_envs, dim], in the order
-    given (env 0 first), so one reset_to() call writes all envs at once."""
+    given (RECORDED_ENV first, then GHOST_ENV), so one reset_to() call writes all envs at once."""
     first = env_states[0]
     return {
         kind: {
@@ -183,6 +374,44 @@ def state_at(states: dict, row: int) -> dict:
 # --------------------------------------------------------------------------------------------------------------------
 # Rendering
 # --------------------------------------------------------------------------------------------------------------------
+
+
+def ghost_asset_matcher(env, ghost_assets: set[str]):
+    """Function that tells whether a prim path belongs to one of the predicted assets (in any env).
+
+    Each scene asset's prim path is a regex that matches the asset in every env, e.g. the robot's is
+    "/World/envs/env_[^/]+/Robot". A prim belongs to the asset if it is that prim or below it, e.g.
+    "/World/envs/env_1/Robot/Geometry/panda_link0/link0_2/link0_2".
+    """
+    patterns = [re.compile(env.scene[name].cfg.prim_path + "(/.*)?") for name in sorted(ghost_assets)]
+    return lambda path: any(pattern.fullmatch(path) for pattern in patterns)
+
+
+def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
+    """Make the predicted assets of the ghost env tinted and transparent, and hide the rest of the ghost env (e.g. its
+    table): it would be drawn exactly on top of the recorded env's copy and only cause flickering. These changes only
+    affect drawing, physics never sees them.
+
+    The Newton visualizer keeps its own Newton model of the scene (built from the USD stage) with one entry per
+    rendered shape. Each shape knows which env ("world") it belongs to (model.shape_world), its prim path
+    (model.shape_label), color and opacity. The viewer re-reads color and opacity from the model every frame, so
+    changing them once here is enough.
+    """
+    is_ghost_asset = ghost_asset_matcher(env, ghost_assets)
+    model = visualizer.backend.model
+    worlds = model.shape_world.numpy()
+    opacities = model.shape_opacity.numpy()
+    colors = model.shape_color.numpy()
+    for shape, (label, world) in enumerate(zip(model.shape_label, worlds)):
+        if world != GHOST_ENV:
+            continue  # shapes of the recorded env, and shared ones like the ground plane (world -1), stay as they are
+        if is_ghost_asset(label):
+            colors[shape] = args_cli.ghost_color
+            opacities[shape] = args_cli.ghost_opacity
+        else:
+            opacities[shape] = 0.0
+    model.shape_opacity.assign(opacities)
+    model.shape_color.assign(colors)
 
 
 def render_frame(env, visualizer, env_states: dict, row: int) -> np.ndarray:
@@ -256,10 +485,12 @@ class Mp4Writer:
 
 
 def main() -> None:
-    # ---- What to show: checkpoint -> recording, split -> episodes, task ----
+    # ---- What to show: checkpoint -> model, recording, split -> episodes, task ----
     checkpoint_path = args_cli.checkpoint.resolve()
     run_dir = checkpoint_path.parent  # train_world_model.py writes checkpoints, config.yaml and split.json here
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model, stats = load_world_model(checkpoint, args_cli.device)
+    H, F = model.history_horizon, model.forecast_horizon
 
     recording = find_recording(checkpoint)
     split = json.loads((run_dir / "split.json").read_text())
@@ -271,10 +502,18 @@ def main() -> None:
             f"{recording.name} doesn't store its task name (recorded before collect.py saved it). "
             "Pass it with --task, e.g. --task ADLR-Lift-Cube-Franka-IK-Abs"
         )
-    print(f"[INFO] checkpoint {checkpoint_path}, recording {recording.name}, task {task}")
+    print(f"[INFO] checkpoint {checkpoint_path} (H={H}, F={F}), recording {recording.name}, task {task}")
+
+    # Load the episodes with the training dataset class, so the model gets exactly the inputs it was trained on
+    # (same state fields in the same order, same quaternion sign fix). H and F only matter for its window index here.
+    dataset = RWMDataset(recording, H, F, included_episodes=episode_ids, preload=True)
+    state_fields = dataset.state_fields
+    # Which assets the model predicts, e.g. {"robot", "object"} (the asset name is the 3rd part of each field)
+    ghost_assets = {field.split("/")[2] for field in state_fields}
 
     # ---- The environment: the recording's task, played back without physics ----
-    env_cfg = parse_env_cfg(task, device=args_cli.device, num_envs=1)
+    env_cfg = parse_env_cfg(task, device=args_cli.device, num_envs=2 if args_cli.ghost else 1)
+    env_cfg.scene.env_spacing = 0.0  # all envs at the same place, so the ghost is drawn on top of the recording
     env_cfg.recorders = {}  # playback must not record a new dataset
     eye, lookat = tuple(args_cli.eye or CAMERA["eye"]), tuple(args_cli.lookat or CAMERA["lookat"])
     env_cfg.sim.visualizer_cfgs = NewtonGLVisualizerCfg(
@@ -296,29 +535,42 @@ def main() -> None:
         visualizer = next(v for v in env.sim.visualizers if hasattr(v, "render_rgb_array"))
         # The task's own viewer settings may override the camera of the config above, so set it once more
         visualizer.set_camera_view(eye, lookat)
+        if args_cli.ghost:
+            style_ghost_env(visualizer, env, ghost_assets)
 
         fps = args_cli.fps or 1.0 / env.step_dt  # step_dt = sim dt x decimation = time between recorded rows
-        output_dir = args_cli.output_dir or run_dir / "videos" / f"{checkpoint_path.stem}_recording"
+        name = f"{checkpoint_path.stem}_" + ("ghost" if args_cli.ghost else "recording")
+        output_dir = args_cli.output_dir or run_dir / "videos" / name
         output_dir.mkdir(parents=True, exist_ok=True)
+        episode_index = {f"{recording.name}:{ep.demo}": i for i, ep in enumerate(dataset._episodes)}
 
         with h5py.File(recording, "r") as handle:
             for episode_id in episode_ids:
-                demo = episode_id.split(":")[1]
-                if demo not in handle["data"]:
-                    print(f"[WARN] {episode_id} skipped: not in the recording")
+                if episode_id not in episode_index:
+                    print(f"[WARN] {episode_id} skipped: not in the recording or shorter than H + F = {H + F} steps")
                     continue
-                episode = handle["data"][demo]
-                length = int(episode.attrs["num_samples"])
+                demo = episode_id.split(":")[1]
+                info = dataset._episodes[episode_index[episode_id]]
                 in_split = next((name for name, ids in split.items() if episode_id in ids), "unknown split")
-                outcome = "success" if episode.attrs.get("success", False) else "failure"
+                outcome = "success" if info.success else "failure"
                 path = output_dir / f"{in_split}_{demo}_{outcome}.mp4"
 
-                env_states = stack_envs(read_recorded_states(episode))
-                print(f"[INFO] {in_split} {demo} ({outcome}, {length} steps)")
+                recorded = read_recorded_states(handle["data"][demo])
+                if args_cli.ghost:
+                    # Model inputs, preprocessed like in training (_load_episode is internal to RWMDataset, but it
+                    # is exactly the code path training uses, so the inputs can't silently differ)
+                    states, actions = dataset._load_episode(episode_index[episode_id])
+                    predicted, has_prediction = predict_episode(model, stats, states, actions)
+                    env_states = stack_envs(recorded, ghost_states(recorded, predicted, state_fields, dataset))
+                    errors = prediction_errors(predicted, states, has_prediction, recorded, state_fields)
+                    print(f"[INFO] {in_split} {demo} ({outcome}, {info.length} steps) | prediction RMSE: {errors}")
+                else:
+                    env_states = stack_envs(recorded)
+                    print(f"[INFO] {in_split} {demo} ({outcome}, {info.length} steps)")
 
                 writer = Mp4Writer(path, fps)
                 try:
-                    for row in range(length):
+                    for row in range(info.length):
                         writer.write(render_frame(env, visualizer, env_states, row))
                         if not visualizer.is_running():  # viewer window was closed
                             raise KeyboardInterrupt
