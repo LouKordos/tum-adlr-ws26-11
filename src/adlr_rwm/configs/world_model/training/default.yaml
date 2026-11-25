@@ -6,7 +6,11 @@ dataset:
   preload: true               # load all episodes into RAM once (~0.8 GB for the 20k-episode recording)
   max_cached_episodes: 128    # per-worker LRU cache, only used with preload=false
 
-val_split: 0.1
+# Whole episodes are assigned to train/val/test, so overlapping windows of one episode never end up in two splits.
+split:
+  val_fraction: 0.1
+  test_fraction: 0.1
+  seed: 0                     # separate from the training seed: changing the training seed keeps the same split
 
 # Kwargs for adlr_rwm.data.make_dataloader (appled to train only because val uses shuffle=false).
 dataloader:

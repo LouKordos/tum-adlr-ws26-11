@@ -1,14 +1,8 @@
-"""Train the SystemDynamicsEnsemble world model on recorded HDF5 episodes.
-
-Work in progress: the train/val/test split and the training loop are still TODO.
-
-    python scripts/train_world_model.py
-    python scripts/train_world_model.py device=cpu world_model.training.logging.wandb.enabled=true
-"""
-
 from pathlib import Path
 
+import h5py
 import hydra
+import numpy as np
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -19,6 +13,24 @@ from adlr_rwm.models import SystemDynamicsEnsemble
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def make_split(recording: Path, val_fraction: float, test_fraction: float, seed: int) -> dict[str, list[str]]:
+    """Randomly assign every episode of a single HDF5 recording to train/val/test."""
+    with h5py.File(recording, "r") as handle:
+        demos = sorted(name for name in handle["data"] if name.startswith("demo_"))
+    episode_ids = [f"{recording.name}:{demo}" for demo in demos]  # same id format as RWMDataset(included_episodes)
+
+    # Sorted ids + fixed seed: the split only depends on which episodes exist, not on the order they are read in
+    shuffled = [episode_ids[i] for i in np.random.default_rng(seed).permutation(len(episode_ids))]
+    n_val, n_test = round(len(shuffled) * val_fraction), round(len(shuffled) * test_fraction)
+    split = {
+        "train": sorted(shuffled[n_val + n_test :]),
+        "val": sorted(shuffled[:n_val]),
+        "test": sorted(shuffled[n_val : n_val + n_test]),
+    }
+
+    return split
+
+
 @hydra.main(config_path="../src/adlr_rwm/configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     wm = cfg.world_model
@@ -26,17 +38,24 @@ def main(cfg: DictConfig) -> None:
 
     data_dir = Path(tr.dataset.data_dir)
     data_dir = data_dir if data_dir.is_absolute() else REPO_ROOT / data_dir
-    dataset_kwargs = {key: value for key, value in tr.dataset.items() if key != "data_dir"}
-    # TODO (split): one dataset per split, each with included_episodes=<that split's "<file name>:<demo>" ids>
-    train_set = RWMDataset(data_dir, wm.history_horizon, wm.forecast_horizon, **dataset_kwargs)
+    recordings = [data_dir] if data_dir.is_file() else sorted(data_dir.glob("*.hdf5"))
+    recording = recordings[0]
 
-    # state_dim/action_dim are not in the YAML because they depend on the recorded fields. Add them to the config
-    # *before* it is saved or sent to wandb, so every run records them like any other parameter.
-    with open_dict(wm):  # Hydra configs are "struct": adding new keys needs open_dict
+    split = make_split(recording, tr.split.val_fraction, tr.split.test_fraction, tr.split.seed)
+    dataset_kwargs = {key: value for key, value in tr.dataset.items() if key != "data_dir"}
+    datasets = {
+        name: RWMDataset(recording, wm.history_horizon, wm.forecast_horizon, included_episodes=ids, **dataset_kwargs)
+        for name, ids in split.items()
+    }
+    train_set = datasets["train"]
+
+    # Values that only exist at runtime are added to the config before it is saved or sent to wandb
+    with open_dict(cfg):
+        # state_dim/action_dim are not in the YAML because they depend on the recorded fields
         wm.state_dim = train_set.state_dim
         wm.action_dim = train_set.action_dim
 
-    # Hydra writes .hydra/config.yaml *before* main() runs, so that copy lacks the inferred values.
+    # Hydra writes .hydra/config.yaml before main() runs, so that copy lacks the inferred values.
     # This one is the complete config of the run.
     run_dir = Path(HydraConfig.get().runtime.output_dir)
     OmegaConf.save(cfg, run_dir / "config.yaml", resolve=True)
@@ -54,9 +73,11 @@ def main(cfg: DictConfig) -> None:
     )
 
     model = SystemDynamicsEnsemble(wm)
-    print(f"state_dim={wm.state_dim} action_dim={wm.action_dim} windows={len(train_set)} run_dir={run_dir}")
+    print(f"state_dim={wm.state_dim} action_dim={wm.action_dim} windows={ {n: len(d) for n, d in datasets.items()} }")
+    print(f"run_dir={run_dir}")
 
-    # TODO: dataloaders, optimizer, training loop, validation, checkpoints (save cfg in each checkpoint too)
+    # TODO: dataloaders (only train shuffles), optimizer, training loop, validation, test, checkpoints
+    #  (save cfg in each checkpoint too)
     del model
 
     run.finish()
