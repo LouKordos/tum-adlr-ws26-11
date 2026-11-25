@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +63,7 @@ class RWMDataset(Dataset):
         max_cached_episodes: int = 128,
         return_meta: bool = False,
         quaternion_slices: Mapping[str, slice] | None = DEFAULT_QUATERNION_SLICES,
+        included_episodes: Collection[str] | None = None,
     ):
         """Validate config, discover HDF5 recordings, and build the window index."""
         if history_horizon <= 0 or forecast_horizon <= 0:
@@ -81,6 +82,8 @@ class RWMDataset(Dataset):
         self.max_cached_episodes = max_cached_episodes
         self.return_meta = return_meta
         self.quaternion_slices = dict(quaternion_slices or {})
+        # Episode ids ("<file name>:<demo>") to index, e.g. one split's episodes. None = all episodes.
+        self.included_episodes = None if included_episodes is None else set(included_episodes)
 
         self._files = self._discover_files()
         self.reset_worker()
@@ -120,6 +123,10 @@ class RWMDataset(Dataset):
                 )
 
                 for demo in demos:
+                    # The id includes the file name because every recording has its own demo_0, demo_1, ...
+                    if self.included_episodes is not None and f"{path.name}:{demo}" not in self.included_episodes:
+                        continue
+
                     group = root[demo]
                     success = bool(group.attrs.get("success", False))
                     if self.only_successful and not success:
