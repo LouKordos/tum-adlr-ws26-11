@@ -289,7 +289,7 @@ def main():
     )
     # The recorder stores env_cfg.env_name in the dataset (data.attrs["env_args"]["env_name"]), so tools like
     # scripts/visualize_world_model.py know which task to play the episodes back in. Isaac Lab's record_demos.py does
-    # the same; without this line the name is saved as "".
+    # the same.
     env_cfg.env_name = TASK_NAME
 
     dataset_dir = args_cli.dataset_dir.expanduser().resolve()
