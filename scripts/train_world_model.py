@@ -251,7 +251,7 @@ def main(cfg: DictConfig) -> None:
                 remaining = (tr.num_epochs - epoch) * steps_per_epoch + steps_per_epoch - i
                 terms = " ".join(f"{k[:-5]} {v:.4g}" for k, v in metrics.items() if k.endswith("_loss"))
                 log.info(
-                    f"epoch {epoch}/{tr.num_epochs} [{i}/{steps_per_epoch}] step {step} | loss {metrics['loss']:.4g} "
+                    f"seed {cfg.seed} | epoch {epoch}/{tr.num_epochs} [{i}/{steps_per_epoch}] step {step} | loss {metrics['loss']:.4g} "
                     f"({terms}) | grad {metrics['grad_norm']:.3g} | lr {metrics['lr']:.2e} | {rate:.1f} it/s, "
                     f"data wait {metrics['data_wait_fraction']:.0%} | eta epoch {hms((steps_per_epoch - i) / rate)}, "
                     f"total {hms(remaining / rate)}"
@@ -275,7 +275,7 @@ def main(cfg: DictConfig) -> None:
             steps = " ".join(f"{val[f'mse_step_{k + 1}']:.3g}" for k in range(wm.forecast_horizon))
             fields = " ".join(f"{name} {val[f'mse_{name}']:.3g}" for name in field_slices)
             log.info(
-                f"epoch {epoch} val | loss {val['loss']:.4g} | mse {val['mse']:.4g} (per step: {steps}) | {fields} | "
+                f"seed {cfg.seed} | epoch {epoch} val | loss {val['loss']:.4g} | mse {val['mse']:.4g} (per step: {steps}) | {fields} | "
                 f"epistemic-error corr {val['epistemic_error_corr']:.2f} | best {tr.checkpoint.best_metric} "
                 f"{best:.4g}{' (new)' if is_best else ''} | train {hms(eval_start - epoch_start)}, "
                 f"eval {hms(time.perf_counter() - eval_start)}, total {hms(time.perf_counter() - start)}"
@@ -294,7 +294,7 @@ def main(cfg: DictConfig) -> None:
     )
     run.log({f"test/{key}": value for key, value in test.items()}, step=step)
     run.summary.update({f"test/{key}": value for key, value in test.items()})
-    log.info(f"test ({checkpoint.name}) | loss {test['loss']:.4g} | mse {test['mse']:.4g}")
+    log.info(f"seed {cfg.seed} | test ({checkpoint.name}) | loss {test['loss']:.4g} | mse {test['mse']:.4g}")
     model_artifact = wandb.Artifact(f"world-model-{run.id}", type="model", metadata={"test": test})
     model_artifact.add_file(str(checkpoint))
     run.log_artifact(model_artifact)
