@@ -1,5 +1,4 @@
 ensemble_size: 5
-bootstrap: true
 
 history_horizon: 8
 forecast_horizon: 3
@@ -18,4 +17,5 @@ defaults:
   - base: rnn
   - state_head: state_head_default
   - auxiliary_head: aux_head_default
+  - training: default
   - _self_

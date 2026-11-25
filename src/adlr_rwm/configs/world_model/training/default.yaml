@@ -1,0 +1,61 @@
+# Kwargs for adlr_rwm.data.RWMDataset (history/forecast horizons come from cfg.world_model).
+dataset:
+  data_dir: data/recordings   # single .hdf5 file or directory searched recursively
+  stride: 1                   # step between window start indices within an episode
+  only_successful: false      # skip episodes without the success flag
+  max_cached_episodes: 128    # per-worker LRU cache
+
+val_split: 0.1
+
+# Kwargs for adlr_rwm.data.make_dataloader (appled to train only because val uses shuffle=false).
+dataloader:
+  batch_size: 1024
+  shuffle: true
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+  persistent_workers: null
+  prefetch_factor: 2
+
+num_epochs: 100
+
+optimizer:
+  type: adam                  # adam | adamw
+  lr: 1.0e-3
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+
+lr_scheduler:
+  type: none                  # none | cosine | step
+  warmup_epochs: 0
+  min_lr: 1.0e-5              # cosine only
+  step_size: 30               # step only, in epochs
+  gamma: 0.1                  # step only
+
+max_grad_norm: 1.0            # null disables gradient clipping
+
+# Passed to SystemDynamicsEnsemble.compute_loss.
+bootstrap: true               # each ensemble head gets a resampled (with replacement) batch
+loss:
+  type: gaussian_nll          # gaussian_nll | mse
+  weights:
+    state: 1.0
+    bound: 0.01               # logstd min/max bound regularizer (PETS uses 0.01). 0 if logstd head disabled
+    extension: 1.0
+    contact: 1.0
+    termination: 1.0
+
+logging:
+  log_interval: 50            # optimizer steps
+  eval_interval: 1            # epochs
+  wandb:
+    enabled: false
+    project: adlr-rwm
+    entity: null
+    run_name: null            # null means auto-generated
+    tags: []
+
+checkpoint:
+  dir: checkpoints/world_model
+  interval: 10                # epochs
+  keep_best: true             # also keep the checkpoint with the lowest val state loss
