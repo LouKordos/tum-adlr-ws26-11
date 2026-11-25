@@ -1,7 +1,7 @@
 ensemble_size: 5
 
-history_horizon: 8
-forecast_horizon: 3
+history_horizon: 16  # input steps (states + actions) the model sees
+forecast_horizon: 8  # autoregressive prediction steps in training and evaluation
 
 # state_dim and action_dim are NOT set here because scripts/train_world_model.py infers them from the dataset and adds
 # them to this config (world_model.state_dim / world_model.action_dim) before the config is saved and sent to wandb.
