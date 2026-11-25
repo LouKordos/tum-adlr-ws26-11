@@ -255,6 +255,18 @@ class RWMDataset(Dataset):
             sample["episode_length"] = torch.tensor(ep.length, dtype=torch.long)
         return sample
 
+    def compute_statistics(self) -> dict[str, tuple[Tensor, Tensor]]:
+        """Per-dimension mean/std of states and actions over all timesteps of the indexed episodes.
+
+        Computed per timestep (not per window), so overlapping windows don't over-weight the middle of episodes.
+        Use the train split only, so no val/test information leaks into the normalization.
+        """
+        if self._preloaded is not None:
+            states, actions, _ = self._preloaded
+        else:
+            states, actions = (torch.cat(x) for x in zip(*(self._load_episode(i) for i in range(len(self._episodes)))))
+        return {"state": (states.mean(dim=0), states.std(dim=0)), "action": (actions.mean(dim=0), actions.std(dim=0))}
+
     def reset_worker(self) -> None:
         """Reset per-process HDF5 handles and LRU cache (called on init and worker spawn/fork)."""
         self._handles: dict[int, h5py.File] = {}
