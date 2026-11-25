@@ -207,7 +207,9 @@ class RWMDataset(Dataset):
 
         sample = {
             "state": state[start:end],
-            "action": action[start:end],
+            # Indexing is very important here! index should mean time, and isaac lab records action taken at t
+            # in the next index, so we need to shift by one to get matched pairs
+            "action": action[start + 1 : end],
         }
         if self.return_meta:
             ep = self._episodes[ep_idx]
