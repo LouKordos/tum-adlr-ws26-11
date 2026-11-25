@@ -207,8 +207,8 @@ class RWMDataset(Dataset):
 
         sample = {
             "state": state[start:end],
-            # Indexing is very important here! index should mean time, and isaac lab records action taken at t
-            # in the next index, so we need to shift by one to get matched pairs
+            # Indexing is very important here! index should mean time, and isaac lab pairs *resulting* state
+            # with each action. Our convention is matching state at t with action at t, and next index will be resulting state.
             "action": action[start + 1 : end],
         }
         if self.return_meta:
