@@ -42,7 +42,7 @@ lr_scheduler:
   step_size: 30               # step only, in epochs
   gamma: 0.1                  # step only
 
-max_grad_norm: 1.0            # null disables gradient clipping
+max_grad_norm: null            # null disables gradient clipping
 
 # Passed to SystemDynamicsEnsemble.compute_loss.
 bootstrap: true               # each ensemble head gets a resampled (with replacement) batch
