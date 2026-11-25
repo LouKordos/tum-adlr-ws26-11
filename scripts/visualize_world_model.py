@@ -33,14 +33,19 @@ H = history_horizon, F = forecast_horizon of the checkpoint (both are read from 
 In both modes the first H steps of an episode have no prediction (they are the history), so the ghost equals the
 recording there.
 
+Layouts (--layout)
+------------------
+* overlay (default): both envs at the same place, the ghost drawn semi-transparent (--ghost_opacity) on top.
+* side_by_side: the envs 1.6 m apart, prediction (left, tinted but opaque) next to the recording (right).
+
 Examples
 --------
-    # 4 random test episodes, chunked predictions
+    # 4 random test episodes, chunked predictions, overlay
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt
 
-    # Free-running predictions for two specific episodes
+    # Free-running predictions for two specific episodes, side by side
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt \
-        --mode free --episodes demo_12 demo_345
+        --mode free --layout side_by_side --episodes demo_12 demo_345
 
     # Only the recording, no ghost
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --no-ghost
@@ -48,8 +53,8 @@ Examples
     # Watch it live in the viewer window while the videos are written
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --window
 
-Videos are written to <run dir>/videos/<checkpoint>_<mode>/ or <checkpoint>_recording/ (inside outputs/, which git
-ignores).
+Videos are written to <run dir>/videos/<checkpoint>_<mode>_<layout>/ or <checkpoint>_recording/ (inside outputs/,
+which git ignores).
 Recordings made before collect.py stored the task name need --task, e.g. --task ADLR-Lift-Cube-Franka-IK-Abs.
 
 This script is deliberately self-contained: its settings are the command line flags below, not the Hydra configs in
@@ -91,7 +96,10 @@ parser.add_argument(
     default=True,
     help="Show the model's prediction as a ghost (default). --no-ghost only plays back the recording.",
 )
-parser.add_argument("--ghost_opacity", type=float, default=0.5, help="Ghost opacity (0-1).")
+parser.add_argument(
+    "--layout", choices=("overlay", "side_by_side"), default="overlay", help="Overlay the ghost or put it next to it."
+)
+parser.add_argument("--ghost_opacity", type=float, default=0.5, help="Ghost opacity for --layout overlay (0-1).")
 parser.add_argument(
     "--ghost_color", type=float, nargs=3, default=(0.15, 0.55, 1.0), help="Ghost RGB tint in [0, 1] (default: blue)."
 )
@@ -104,8 +112,8 @@ parser.add_argument(
 parser.add_argument("--output_dir", type=Path, default=None, help="Where to write the mp4s (default: see docstring).")
 parser.add_argument("--width", type=int, default=1920, help="Video width in pixels (default: 1920).")
 parser.add_argument("--height", type=int, default=1080, help="Video height in pixels (default: 1080).")
-parser.add_argument("--eye", type=float, nargs=3, default=None, help="Camera position [m]. Default: CAMERA below.")
-parser.add_argument("--lookat", type=float, nargs=3, default=None, help="Camera target [m]. Default: CAMERA below.")
+parser.add_argument("--eye", type=float, nargs=3, default=None, help="Camera position [m]. Default depends on layout.")
+parser.add_argument("--lookat", type=float, nargs=3, default=None, help="Camera target [m]. Default depends on layout.")
 parser.add_argument(
     "--window",
     action="store_true",
@@ -146,10 +154,20 @@ from adlr_rwm.models import SystemDynamicsEnsemble
 RECORDED_ENV = 0
 GHOST_ENV = 1
 
-# Camera: eye and lookat in [m], focal length of the lens in [mm] (Isaac Lab's default of 12 mm is very wide-angle and
-# makes the robot tiny). The robot base is at the env origin and the robot faces +x; the table top is at z = 0 and the
-# cube starts around x = 0.5 on it.
-CAMERA = {"eye": (1.9, -1.5, 1.0), "lookat": (0.35, 0.0, 0.35), "focal_length": 24.0}
+# Default cameras: eye and lookat in [m], focal length of the lens in [mm] (Isaac Lab's default of 12 mm is very
+# wide-angle and makes the robot tiny). The robot base is at the env origin and the robot faces +x; the table top is
+# at z = 0 and the cube starts around x = 0.5 on it.
+CAMERAS = {
+    "overlay": {"eye": (1.9, -1.5, 1.0), "lookat": (0.35, 0.0, 0.35), "focal_length": 24.0},
+    # side_by_side: Isaac Lab places 2 envs at x = +0.8 (env 0, recording) and x = -0.8 (env 1, prediction). Each
+    # table reaches ~1 m in +x from its robot, so the scene spans x = -0.8 .. 1.8. Seen from the side (-y), the
+    # prediction is on the left, the recording on the right, and the tables' posts (at their +y edge) are behind the
+    # robots instead of in front. The camera is far away with a long lens, so both robots are seen from almost the
+    # same angle (from close by, one would be seen from the front and the other from behind, so equal poses would
+    # look different).
+    "side_by_side": {"eye": (0.5, -5.5, 2.2), "lookat": (0.5, 0.0, 0.35), "focal_length": 40.0},
+}
+SIDE_BY_SIDE_SPACING = 1.6  # [m] between the two envs in the side_by_side layout
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -399,9 +417,9 @@ def ghost_asset_matcher(env, ghost_assets: set[str]):
 
 
 def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
-    """Make the predicted assets of the ghost env tinted and transparent, and hide the rest of the ghost env (e.g. its
-    table): it would be drawn exactly on top of the recorded env's copy and only cause flickering. These changes only
-    affect drawing, physics never sees them.
+    """Make the predicted assets of the ghost env tinted (and transparent in the overlay layout). In the overlay
+    layout, also hide the rest of the ghost env (e.g. its table): it would be drawn exactly on top of the recorded
+    env's copy and only cause flickering. These changes only affect drawing, physics never sees them.
 
     The Newton visualizer keeps its own Newton model of the scene (built from the USD stage) with one entry per
     rendered shape. Each shape knows which env ("world") it belongs to (model.shape_world), its prim path
@@ -409,6 +427,8 @@ def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
     changing them once here is enough.
     """
     is_ghost_asset = ghost_asset_matcher(env, ghost_assets)
+    opacity = args_cli.ghost_opacity if args_cli.layout == "overlay" else 1.0  # side by side it can stay opaque
+    hide_rest = args_cli.layout == "overlay"
     model = visualizer.backend.model
     worlds = model.shape_world.numpy()
     opacities = model.shape_opacity.numpy()
@@ -418,8 +438,8 @@ def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
             continue  # shapes of the recorded env, and shared ones like the ground plane (world -1), stay as they are
         if is_ghost_asset(label):
             colors[shape] = args_cli.ghost_color
-            opacities[shape] = args_cli.ghost_opacity
-        else:
+            opacities[shape] = opacity
+        elif hide_rest:
             opacities[shape] = 0.0
     model.shape_opacity.assign(opacities)
     model.shape_color.assign(colors)
@@ -523,14 +543,18 @@ def main() -> None:
     ghost_assets = {field.split("/")[2] for field in state_fields}
 
     # ---- The environment: the recording's task, played back without physics ----
+    # Without a ghost there is nothing to put next to the recording, so the layout is always "overlay" (one env)
+    layout = args_cli.layout if args_cli.ghost else "overlay"
     env_cfg = parse_env_cfg(task, device=args_cli.device, num_envs=2 if args_cli.ghost else 1)
-    env_cfg.scene.env_spacing = 0.0  # all envs at the same place, so the ghost is drawn on top of the recording
+    # overlay: both envs at the same place. side_by_side: Isaac Lab spreads the envs on a grid with this spacing
+    env_cfg.scene.env_spacing = SIDE_BY_SIDE_SPACING if layout == "side_by_side" else 0.0
     env_cfg.recorders = {}  # playback must not record a new dataset
-    eye, lookat = tuple(args_cli.eye or CAMERA["eye"]), tuple(args_cli.lookat or CAMERA["lookat"])
+    camera = CAMERAS[layout]
+    eye, lookat = tuple(args_cli.eye or camera["eye"]), tuple(args_cli.lookat or camera["lookat"])
     env_cfg.sim.visualizer_cfgs = NewtonGLVisualizerCfg(
         eye=eye,
         lookat=lookat,
-        focal_length=CAMERA["focal_length"],
+        focal_length=camera["focal_length"],
         window_width=args_cli.width,  # also the size of the recorded frames
         window_height=args_cli.height,
         enable_picking=False,  # dragging bodies with the mouse makes no sense without physics
@@ -550,7 +574,7 @@ def main() -> None:
             style_ghost_env(visualizer, env, ghost_assets)
 
         fps = args_cli.fps or 1.0 / env.step_dt  # step_dt = sim dt x decimation = time between recorded rows
-        name = f"{checkpoint_path.stem}_" + (args_cli.mode if args_cli.ghost else "recording")
+        name = f"{checkpoint_path.stem}_" + (f"{args_cli.mode}_{layout}" if args_cli.ghost else "recording")
         output_dir = args_cli.output_dir or run_dir / "videos" / name
         output_dir.mkdir(parents=True, exist_ok=True)
         episode_index = {f"{recording.name}:{ep.demo}": i for i, ep in enumerate(dataset._episodes)}
