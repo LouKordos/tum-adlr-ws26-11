@@ -326,6 +326,31 @@ class SystemDynamicsEnsemble(nn.Module):
         kl_loss = torch.mean(torch.cat(kl_losses, dim=0), dim=0)
         return state_loss, sequence_loss, bound_loss, kl_loss
 
+    def forecast(self, state_batch, action_batch):
+        """Open-loop forecast of the F states after the history, feeding back the ensemble-mean prediction.
+
+        Deterministic counterpart of compute_state_loss (same windows and action indexing), used for evaluation.
+        Returns (state_means [B, F, state_dim], aleatoric [B, F], epistemic [B, F]).
+        """
+        self.reset()
+        x_state_batch = state_batch[:, : self.history_horizon]
+        state_means, aleatoric, epistemic = [], [], []
+        for i in range(self.forecast_horizon):
+            if self.base_cfg.type in ["rnn", "rssm"] and i > 0:
+                x_action_batch = action_batch[:, self.history_horizon + i : self.history_horizon + i + 1]
+            else:
+                x_action_batch = action_batch[:, i + 1 : self.history_horizon + i + 1]
+            state_mean, aleatoric_i, epistemic_i, *_ = self.forward(x_state_batch, x_action_batch)
+            state_means.append(state_mean)
+            aleatoric.append(aleatoric_i)
+            epistemic.append(epistemic_i)
+            if self.base_cfg.type in ["rnn", "rssm"]:
+                x_state_batch = state_mean.unsqueeze(1)
+            else:
+                x_state_batch = torch.cat([x_state_batch[:, 1:], state_mean.unsqueeze(1)], dim=1)
+        self.reset()
+        return torch.stack(state_means, dim=1), torch.stack(aleatoric, dim=1), torch.stack(epistemic, dim=1)
+
     def compute_auxiliary_loss(
         self, head, state_batch, action_batch, extension_batch, contact_batch, termination_batch
     ):
