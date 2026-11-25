@@ -18,8 +18,7 @@ How it works
    states. Nothing is simulated: every frame we write both states directly into the simulator (like replaying motion
    capture) and render one image. Physics would only get in the way here, because the prediction should be shown
    exactly as predicted, even if it is physically impossible (e.g. a floating cube).
-4. The Newton GL visualizer (OpenGL, so it works without an RTX GPU) renders the frames, and ffmpeg turns them into
-   one mp4 per episode.
+4. A visualizer renders the frames (see "Renderers"), and ffmpeg turns them into one mp4 per episode.
 
 Prediction modes (--mode)
 -------------------------
@@ -38,6 +37,14 @@ Layouts (--layout)
 * overlay (default): both envs at the same place, the ghost drawn semi-transparent (--ghost_opacity) on top.
 * side_by_side: the envs 1.6 m apart, prediction (left, tinted but opaque) next to the recording (right).
 
+Renderers (--renderer)
+----------------------
+* newton (default): Newton's OpenGL visualizer. Fast and works on any GPU (this is what the laptop's Quadro T1000,
+  which has no ray tracing cores, can run).
+* kit: Isaac Sim's RTX renderer (ray traced, photorealistic). Needs an NVIDIA RTX GPU, so use it on a machine that
+  has one. The look can be tuned in RTX_SETTINGS below (e.g. path tracing for even more realism). Not tested yet,
+  because the laptop can't run it.
+
 Playback speed (--speed)
 ------------------------
 --speed 0.25 plays the episode at quarter speed (slow motion, good for contacts), --speed 2 twice as fast. The video
@@ -53,14 +60,13 @@ Examples
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt \
         --mode free --layout side_by_side --speed 0.5 --episodes demo_12 demo_345
 
-    # Only the recording, no ghost
-    uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --no-ghost
+    # Photorealistic recording-only videos on a machine with an RTX GPU
+    uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --renderer kit --no-ghost
 
     # Watch it live in the viewer window while the videos are written
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --window
 
-Videos are written to <run dir>/videos/<checkpoint>_<mode>_<layout>/ or <checkpoint>_recording/ (inside outputs/,
-which git ignores).
+Videos are written to <run dir>/videos/<checkpoint>_<renderer>_<mode>_<layout>/ (inside outputs/, which git ignores).
 Recordings made before collect.py stored the task name need --task, e.g. --task ADLR-Lift-Cube-Franka-IK-Abs.
 
 This script is deliberately self-contained: its settings are the command line flags below, not the Hydra configs in
@@ -110,6 +116,9 @@ parser.add_argument(
     "--ghost_color", type=float, nargs=3, default=(0.15, 0.55, 1.0), help="Ghost RGB tint in [0, 1] (default: blue)."
 )
 parser.add_argument(
+    "--renderer", choices=("newton", "kit"), default="newton", help="newton (OpenGL, any GPU) or kit (RTX, photoreal)."
+)
+parser.add_argument(
     "--speed", type=float, default=1.0, help="Playback speed: 1 = real time, 0.25 = slow motion, 2 = fast forward."
 )
 parser.add_argument(
@@ -126,7 +135,7 @@ parser.add_argument("--lookat", type=float, nargs=3, default=None, help="Camera 
 parser.add_argument(
     "--window",
     action="store_true",
-    help="Open the viewer window to watch while rendering (don't resize it, that breaks the video). "
+    help="Open the viewer window to watch while rendering (newton: don't resize it, that breaks the video). "
     "Default: render off-screen, only the mp4s are written.",
 )
 # Adds Isaac Lab's own flags, e.g. --device (default cuda:0)
@@ -142,6 +151,11 @@ if not args_cli.window:
     # that says so. This has to happen before pyglet (the viewer's window library) is imported by the imports below.
     os.environ.pop("DISPLAY", None)
     os.environ.pop("WAYLAND_DISPLAY", None)
+# Isaac Sim (Kit) reads these launcher options: no Kit window unless --window. Off-screen RTX rendering into an image
+# (what --renderer kit records) needs the camera/rendering extensions, which enable_cameras turns on.
+args_cli.headless = not args_cli.window
+if args_cli.renderer == "kit":
+    args_cli.enable_cameras = True
 
 import json
 import math
@@ -155,6 +169,7 @@ import isaaclab_tasks  # noqa: F401  (registers Isaac Lab's tasks with gym)
 import numpy as np
 import torch
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
+from isaaclab_visualizers.kit import KitVisualizerCfg
 from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 from omegaconf import OmegaConf
 
@@ -180,6 +195,19 @@ CAMERAS = {
     "side_by_side": {"eye": (0.5, -5.5, 2.2), "lookat": (0.5, 0.0, 0.35), "focal_length": 40.0},
 }
 SIDE_BY_SIDE_SPACING = 1.6  # [m] between the two envs in the side_by_side layout
+
+# RTX settings for --renderer kit, applied through Isaac Lab's IsaacRtxRendererGlobalSettingsCfg (see its fields for
+# everything that can be tuned). The ghost needs translucency and "fractional cutout opacity", otherwise RTX draws a
+# surface with opacity 0.5 either fully or not at all (Isaac Lab's assemble_trocar task uses the same two settings).
+# DLAA is the best-looking anti-aliasing. For even more photorealism, add "rtx.rendermode": "RealTimePathTracing" to
+# carb_settings and raise KIT_RENDERS_PER_FRAME, so the path tracer has time to converge on every frame.
+RTX_SETTINGS = {
+    "enable_translucency": True,
+    "antialiasing_mode": "DLAA",
+    "carb_settings": {"rtx.raytracing.fractionalCutoutOpacity": True},
+}
+KIT_RENDERS_PER_FRAME = 1  # RTX render passes per video frame; only the last one is recorded
+KIT_WARMUP_RENDERS = 30  # RTX returns black or noisy frames right after starting, so render this often before recording
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -436,8 +464,34 @@ def state_at(states: dict, row: float) -> dict:
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Rendering
+# Renderers: everything that differs between --renderer newton and --renderer kit is in this section
 # --------------------------------------------------------------------------------------------------------------------
+
+
+def make_visualizer_cfg(camera: dict, eye: tuple, lookat: tuple):
+    """Visualizer config for the chosen renderer. Image size, camera and lens are the same for both."""
+    common = {
+        "eye": eye,
+        "lookat": lookat,
+        "focal_length": camera["focal_length"],
+        "window_width": args_cli.width,  # also the size of the recorded frames
+        "window_height": args_cli.height,
+    }
+    if args_cli.renderer == "kit":
+        return KitVisualizerCfg(headless=not args_cli.window, **common)
+    return NewtonGLVisualizerCfg(
+        enable_picking=False,  # dragging bodies with the mouse makes no sense without physics
+        **common,
+    )
+
+
+def apply_rtx_settings() -> None:
+    """Apply RTX_SETTINGS (kit only). Must run after Isaac Sim started and before the renderer is set up."""
+    # Imported here because it needs a running Isaac Sim
+    from isaaclab_physx.renderers import IsaacRtxRendererGlobalSettingsCfg
+    from isaaclab_physx.renderers.isaac_rtx_renderer_utils import apply_isaac_rtx_global_settings
+
+    apply_isaac_rtx_global_settings(IsaacRtxRendererGlobalSettingsCfg(**RTX_SETTINGS))
 
 
 def ghost_asset_matcher(env, ghost_assets: set[str]):
@@ -454,16 +508,21 @@ def ghost_asset_matcher(env, ghost_assets: set[str]):
 def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
     """Make the predicted assets of the ghost env tinted (and transparent in the overlay layout). In the overlay
     layout, also hide the rest of the ghost env (e.g. its table): it would be drawn exactly on top of the recorded
-    env's copy and only cause flickering. These changes only affect drawing, physics never sees them.
-
-    The Newton visualizer keeps its own Newton model of the scene (built from the USD stage) with one entry per
-    rendered shape. Each shape knows which env ("world") it belongs to (model.shape_world), its prim path
-    (model.shape_label), color and opacity. The viewer re-reads color and opacity from the model every frame, so
-    changing them once here is enough.
-    """
+    env's copy and only cause flickering. These changes only affect drawing, physics never sees them."""
     is_ghost_asset = ghost_asset_matcher(env, ghost_assets)
     opacity = args_cli.ghost_opacity if args_cli.layout == "overlay" else 1.0  # side by side it can stay opaque
     hide_rest = args_cli.layout == "overlay"
+    if args_cli.renderer == "kit":
+        _style_ghost_env_kit(env, is_ghost_asset, opacity, hide_rest)
+    else:
+        _style_ghost_env_newton(visualizer, is_ghost_asset, opacity, hide_rest)
+
+
+def _style_ghost_env_newton(visualizer, is_ghost_asset, opacity: float, hide_rest: bool) -> None:
+    """Newton: the visualizer keeps its own Newton model of the scene (built from the USD stage) with one entry per
+    rendered shape. Each shape knows which env ("world") it belongs to (model.shape_world), its prim path
+    (model.shape_label), color and opacity. The viewer re-reads color and opacity from the model every frame, so
+    changing them once here is enough."""
     model = visualizer.backend.model
     worlds = model.shape_world.numpy()
     opacities = model.shape_opacity.numpy()
@@ -480,13 +539,35 @@ def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
     model.shape_color.assign(colors)
 
 
+def _style_ghost_env_kit(env, is_ghost_asset, opacity: float, hide_rest: bool) -> None:
+    """Kit/RTX: renders the USD stage directly, so the ghost look is a USD material. We create one tinted,
+    semi-transparent material and bind it to the ghost env's predicted assets. "stronger than descendants" makes it
+    override the materials the robot's meshes have themselves. Everything else in the ghost env is made invisible."""
+    # Imported here because they need a running Isaac Sim
+    import isaaclab.sim as sim_utils
+    from pxr import UsdGeom
+
+    stage = sim_utils.get_current_stage()
+    material_path = "/World/Looks/WorldModelGhost"
+    material_cfg = sim_utils.PreviewSurfaceCfg(diffuse_color=tuple(args_cli.ghost_color), opacity=opacity)
+    sim_utils.spawn_preview_surface(material_path, material_cfg)
+    # The direct children of the ghost env's prim are its assets, e.g. /World/envs/env_1/Robot, .../Object, .../Table
+    for child in stage.GetPrimAtPath(f"{env.scene.env_ns}/env_{GHOST_ENV}").GetChildren():
+        path = child.GetPath().pathString
+        if is_ghost_asset(path):
+            sim_utils.bind_visual_material(path, material_path, stage=stage, stronger_than_descendants=True)
+        elif hide_rest:
+            UsdGeom.Imageable(child).MakeInvisible()
+
+
 def render_frame(env, visualizer, env_states: dict, row: float) -> np.ndarray:
     """Show the episode at (possibly fractional) `row` in all envs and return the rendered image [height, width, 3]."""
     # Write the envs' states into the simulator. is_relative: the recorder stored positions relative to each env's
     # origin. This sets poses and joint positions directly, no physics.
     env.scene.reset_to(state_at(env_states, row), is_relative=True)
     env.sim.forward()  # compute the robot's link poses from the new joint positions
-    env.sim.render()  # let the visualizer draw them
+    for _ in range(KIT_RENDERS_PER_FRAME if args_cli.renderer == "kit" else 1):
+        env.sim.render()  # let the visualizer draw them
     return visualizer.render_rgb_array()
 
 
@@ -586,19 +667,14 @@ def main() -> None:
     env_cfg.recorders = {}  # playback must not record a new dataset
     camera = CAMERAS[layout]
     eye, lookat = tuple(args_cli.eye or camera["eye"]), tuple(args_cli.lookat or camera["lookat"])
-    env_cfg.sim.visualizer_cfgs = NewtonGLVisualizerCfg(
-        eye=eye,
-        lookat=lookat,
-        focal_length=camera["focal_length"],
-        window_width=args_cli.width,  # also the size of the recorded frames
-        window_height=args_cli.height,
-        enable_picking=False,  # dragging bodies with the mouse makes no sense without physics
-    )
+    env_cfg.sim.visualizer_cfgs = make_visualizer_cfg(camera, eye, lookat)
 
     with launch_simulation(env_cfg, args_cli):
         # Only after the launch: inspecting the configs triggers Isaac Lab's lazy imports, which load USD (pxr), and
         # USD must not be loaded before Isaac Sim has started (it then fails with "undefined symbol" errors)
         disable_debug_markers(env_cfg)
+        if args_cli.renderer == "kit":
+            apply_rtx_settings()
         env = gym.make(task, cfg=env_cfg).unwrapped
         env.reset()
         env.sim.render()  # first render, so that the visualizer exists and has built its view of the scene
@@ -614,7 +690,9 @@ def main() -> None:
         fps = args_cli.fps or data_fps
         rows_per_frame = args_cli.speed * data_fps / fps
 
-        name = f"{checkpoint_path.stem}_" + (f"{args_cli.mode}_{layout}" if args_cli.ghost else "recording")
+        name = f"{checkpoint_path.stem}_{args_cli.renderer}_" + (
+            f"{args_cli.mode}_{layout}" if args_cli.ghost else "recording"
+        )
         if args_cli.speed != 1:
             name += f"_speed{args_cli.speed:g}"
         output_dir = args_cli.output_dir or run_dir / "videos" / name
@@ -645,11 +723,28 @@ def main() -> None:
                     env_states = stack_envs(recorded)
                     print(f"[INFO] {in_split} {demo} ({outcome}, {info.length} steps)")
 
+                if args_cli.renderer == "kit":
+                    for _ in range(KIT_WARMUP_RENDERS):
+                        render_frame(env, visualizer, env_states, 0.0)
+
                 writer = Mp4Writer(path, fps)
                 try:
                     num_frames = math.floor((info.length - 1) / rows_per_frame) + 1  # the last frame shows the last row
                     for frame in range(num_frames):
-                        writer.write(render_frame(env, visualizer, env_states, frame * rows_per_frame))
+                        image = render_frame(env, visualizer, env_states, frame * rows_per_frame)
+                        if frame == 0 and not image.any():
+                            # A completely black image means the renderer isn't working, e.g. RTX on a GPU without
+                            # ray tracing cores. Isaac Sim only logs that as a warning, so stop here instead of
+                            # silently writing black videos. (Printed explicitly, because Isaac Sim's shutdown
+                            # swallows the message of an exception raised inside launch_simulation.)
+                            print(
+                                f"[ERROR] The {args_cli.renderer} renderer returned a black image. For --renderer kit "
+                                "this usually means RTX could not start (it needs an NVIDIA RTX GPU, see the omni.rtx "
+                                "messages above).",
+                                flush=True,
+                            )
+                            raise SystemExit(1)
+                        writer.write(image)
                         if not visualizer.is_running():  # viewer window was closed
                             raise KeyboardInterrupt
                 except KeyboardInterrupt:
