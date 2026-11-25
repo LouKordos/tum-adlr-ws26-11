@@ -38,14 +38,20 @@ Layouts (--layout)
 * overlay (default): both envs at the same place, the ghost drawn semi-transparent (--ghost_opacity) on top.
 * side_by_side: the envs 1.6 m apart, prediction (left, tinted but opaque) next to the recording (right).
 
+Playback speed (--speed)
+------------------------
+--speed 0.25 plays the episode at quarter speed (slow motion, good for contacts), --speed 2 twice as fast. The video
+frame rate stays the same (--fps, default: the recording's 50 Hz); for slow motion, frames between two recorded steps
+are interpolated, so the motion stays smooth instead of stuttering.
+
 Examples
 --------
     # 4 random test episodes, chunked predictions, overlay
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt
 
-    # Free-running predictions for two specific episodes, side by side
+    # Free-running predictions for two specific episodes, side by side, in slow motion
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt \
-        --mode free --layout side_by_side --episodes demo_12 demo_345
+        --mode free --layout side_by_side --speed 0.5 --episodes demo_12 demo_345
 
     # Only the recording, no ghost
     uv run python scripts/visualize_world_model.py --checkpoint outputs/<date>/<time>/best.pt --no-ghost
@@ -104,7 +110,10 @@ parser.add_argument(
     "--ghost_color", type=float, nargs=3, default=(0.15, 0.55, 1.0), help="Ghost RGB tint in [0, 1] (default: blue)."
 )
 parser.add_argument(
-    "--fps", type=float, default=None, help="Video frame rate. Default: real time (one frame per recorded step)."
+    "--speed", type=float, default=1.0, help="Playback speed: 1 = real time, 0.25 = slow motion, 2 = fast forward."
+)
+parser.add_argument(
+    "--fps", type=float, default=None, help="Video frame rate. Default: the recording's rate (50 Hz for the lift task)."
 )
 parser.add_argument(
     "--task", default=None, help="Isaac Lab task to play back in. Default: the task name stored in the recording."
@@ -123,6 +132,8 @@ parser.add_argument(
 # Adds Isaac Lab's own flags, e.g. --device (default cuda:0)
 add_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.speed <= 0:
+    parser.error("--speed must be positive")
 
 import os
 
@@ -133,6 +144,7 @@ if not args_cli.window:
     os.environ.pop("WAYLAND_DISPLAY", None)
 
 import json
+import math
 import random
 import re
 import subprocess
@@ -392,12 +404,35 @@ def stack_envs(*env_states: dict) -> dict:
     }
 
 
-def state_at(states: dict, row: int) -> dict:
-    """Scene state at one recorded step (row) of the episode: tensors [T, num_envs, dim] -> [num_envs, dim]."""
-    return {
-        kind: {name: {q: v[row] for q, v in asset.items()} for name, asset in assets.items()}
-        for kind, assets in states.items()
-    }
+def state_at(states: dict, row: float) -> dict:
+    """Scene state at a possibly fractional row of the episode, e.g. row 10.25 = a quarter of the way from 10 to 11.
+
+    Needed for slow motion: at --speed 0.25, four video frames show the time between two recorded steps. Instead of
+    showing the same pose four times (stuttering), we blend the two neighboring rows. Positions, joint angles and
+    velocities are blended linearly. Orientations (quaternions) are blended the same way and then scaled back to unit
+    length ("nlerp"), which is accurate for the small rotations between two steps 20 ms apart. In Isaac Lab, every
+    quantity named "*_pose" is position (x, y, z) followed by a quaternion (x, y, z, w).
+    Tensors go from [T, num_envs, dim] to [num_envs, dim].
+    """
+    lower = math.floor(row)
+    weight = row - lower  # 0 = exactly the lower row, towards 1 = the next row
+    result = {}
+    for kind, assets in states.items():
+        result[kind] = {}
+        for name, asset in assets.items():
+            result[kind][name] = {}
+            for quantity, value in asset.items():
+                upper = min(lower + 1, len(value) - 1)  # the last row has no next row
+                a, b = value[lower], value[upper]
+                if quantity.endswith("_pose"):
+                    # q and -q are the same rotation; flip b where needed so we blend along the short way
+                    dot = (a[..., 3:7] * b[..., 3:7]).sum(dim=-1, keepdim=True)
+                    b = torch.cat([b[..., :3], torch.where(dot < 0, -b[..., 3:7], b[..., 3:7])], dim=-1)
+                blended = a + weight * (b - a)
+                if quantity.endswith("_pose"):
+                    blended[..., 3:7] = torch.nn.functional.normalize(blended[..., 3:7], dim=-1)
+                result[kind][name][quantity] = blended
+    return result
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -445,8 +480,8 @@ def style_ghost_env(visualizer, env, ghost_assets: set[str]) -> None:
     model.shape_color.assign(colors)
 
 
-def render_frame(env, visualizer, env_states: dict, row: int) -> np.ndarray:
-    """Show the episode at `row` in all envs and return the rendered image [height, width, 3]."""
+def render_frame(env, visualizer, env_states: dict, row: float) -> np.ndarray:
+    """Show the episode at (possibly fractional) `row` in all envs and return the rendered image [height, width, 3]."""
     # Write the envs' states into the simulator. is_relative: the recorder stored positions relative to each env's
     # origin. This sets poses and joint positions directly, no physics.
     env.scene.reset_to(state_at(env_states, row), is_relative=True)
@@ -573,8 +608,15 @@ def main() -> None:
         if args_cli.ghost:
             style_ghost_env(visualizer, env, ghost_assets)
 
-        fps = args_cli.fps or 1.0 / env.step_dt  # step_dt = sim dt x decimation = time between recorded rows
+        # Timing. data_fps: recorded steps per second (step_dt = sim dt x decimation = time between recorded rows).
+        # Every video frame advances the episode by rows_per_frame recorded steps, e.g. 0.25 at --speed 0.25.
+        data_fps = 1.0 / env.step_dt
+        fps = args_cli.fps or data_fps
+        rows_per_frame = args_cli.speed * data_fps / fps
+
         name = f"{checkpoint_path.stem}_" + (f"{args_cli.mode}_{layout}" if args_cli.ghost else "recording")
+        if args_cli.speed != 1:
+            name += f"_speed{args_cli.speed:g}"
         output_dir = args_cli.output_dir or run_dir / "videos" / name
         output_dir.mkdir(parents=True, exist_ok=True)
         episode_index = {f"{recording.name}:{ep.demo}": i for i, ep in enumerate(dataset._episodes)}
@@ -605,8 +647,9 @@ def main() -> None:
 
                 writer = Mp4Writer(path, fps)
                 try:
-                    for row in range(info.length):
-                        writer.write(render_frame(env, visualizer, env_states, row))
+                    num_frames = math.floor((info.length - 1) / rows_per_frame) + 1  # the last frame shows the last row
+                    for frame in range(num_frames):
+                        writer.write(render_frame(env, visualizer, env_states, frame * rows_per_frame))
                         if not visualizer.is_running():  # viewer window was closed
                             raise KeyboardInterrupt
                 except KeyboardInterrupt:
