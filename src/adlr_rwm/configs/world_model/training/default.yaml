@@ -3,7 +3,8 @@ dataset:
   data_dir: data/recordings   # single .hdf5 file or directory searched recursively
   stride: 1                   # step between window start indices within an episode
   only_successful: false      # skip episodes without the success flag
-  max_cached_episodes: 128    # per-worker LRU cache
+  preload: true               # load all episodes into RAM once (~0.8 GB for the 20k-episode recording)
+  max_cached_episodes: 128    # per-worker LRU cache, only used with preload=false
 
 val_split: 0.1
 

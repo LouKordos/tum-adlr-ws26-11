@@ -64,6 +64,7 @@ class RWMDataset(Dataset):
         return_meta: bool = False,
         quaternion_slices: Mapping[str, slice] | None = DEFAULT_QUATERNION_SLICES,
         included_episodes: Collection[str] | None = None,
+        preload: bool = True,
     ):
         """Validate config, discover HDF5 recordings, and build the window index."""
         if history_horizon <= 0 or forecast_horizon <= 0:
@@ -95,6 +96,13 @@ class RWMDataset(Dataset):
                 f"No windows of length {self.sequence_length} found in {self.data_dir}. "
                 "Collect longer episodes or reduce history/forecast horizons."
             )
+
+        # preload=True reads every indexed episode into RAM once, so __getitem__ never touches the disk. Without it,
+        # random access re-reads (almost) a whole episode per sample, because the LRU cache rarely hits.
+        # Layout: (states [N, state_dim], actions [N, action_dim], start row of each episode in those tensors).
+        self._preloaded: tuple[Tensor, Tensor, list[int]] | None = None
+        if preload:
+            self._preload()
 
     def _discover_files(self) -> list[Path]:
         """Return ``[data_dir]`` if given a file, or all ``.hdf5``/``.h5`` files under it."""
@@ -177,14 +185,8 @@ class RWMDataset(Dataset):
             quat[1:] *= flips[:, None]
         return torch.from_numpy(array)
 
-    def _load_episode(self, ep_idx: int) -> tuple[Tensor, Tensor]:
-        """Fetch concatenated ``(state, action)`` tensors for ``ep_idx`` from LRU cache or disk."""
-        cached = self._episode_cache.get(ep_idx)
-        # Caches episode for faster access without fs read
-        if cached is not None:
-            self._episode_cache.move_to_end(ep_idx)
-            return cached
-
+    def _read_episode(self, ep_idx: int) -> tuple[Tensor, Tensor]:
+        """Read concatenated ``(state, action)`` tensors for ``ep_idx`` from disk."""
         ep = self._episodes[ep_idx]
         handle = self._handles.get(ep.file_idx)
         # Caches handle for faster access without lookup
@@ -195,8 +197,35 @@ class RWMDataset(Dataset):
         group = handle.get("data", handle)[ep.demo]
         state = torch.cat([self._read_field(group, f) for f in self.state_fields], dim=-1)
         action = self._read_field(group, self.action_field)
+        return state, action
 
-        pair = (state, action)
+    def _preload(self) -> None:
+        """Copy all indexed episodes into two preallocated tensors (forked DataLoader workers share them)."""
+        offsets = [0]
+        for ep in self._episodes:
+            offsets.append(offsets[-1] + ep.length)
+        states = torch.empty(offsets[-1], self.state_dim)
+        actions = torch.empty(offsets[-1], self.action_dim)
+        for ep_idx in range(len(self._episodes)):
+            states[offsets[ep_idx] : offsets[ep_idx + 1]], actions[offsets[ep_idx] : offsets[ep_idx + 1]] = (
+                self._read_episode(ep_idx)
+            )
+        self.close()  # HDF5 handles are no longer needed
+        self._preloaded = (states, actions, offsets)
+
+    def _load_episode(self, ep_idx: int) -> tuple[Tensor, Tensor]:
+        """Fetch concatenated ``(state, action)`` tensors for ``ep_idx`` from RAM, LRU cache or disk."""
+        if self._preloaded is not None:
+            states, actions, offsets = self._preloaded
+            return states[offsets[ep_idx] : offsets[ep_idx + 1]], actions[offsets[ep_idx] : offsets[ep_idx + 1]]
+
+        cached = self._episode_cache.get(ep_idx)
+        # Caches episode for faster access without fs read
+        if cached is not None:
+            self._episode_cache.move_to_end(ep_idx)
+            return cached
+
+        pair = self._read_episode(ep_idx)
         # LRU cache logic
         self._episode_cache[ep_idx] = pair
         if self.max_cached_episodes is not None and len(self._episode_cache) > self.max_cached_episodes:
