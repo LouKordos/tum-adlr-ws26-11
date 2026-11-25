@@ -207,9 +207,9 @@ class RWMDataset(Dataset):
 
         sample = {
             "state": state[start:end],
-            # Indexing is very important here! index should mean time, and isaac lab pairs *resulting* state
-            # with each action. Our convention is matching state at t with action at t, and next index will be resulting state.
-            "action": action[start + 1 : end],
+            # No shift here, because Isaac Lab stores each action in the same row as the state it results in
+            # (actions[k] -> states[k]), but SystemDynamicsEnsemble does the shift itself
+            "action": action[start:end],
         }
         if self.return_meta:
             ep = self._episodes[ep_idx]
