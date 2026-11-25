@@ -183,7 +183,14 @@ class SystemDynamicsEnsemble(nn.Module):
         )
 
     def compute_loss(
-        self, state_batch, action_batch, extension_batch, contact_batch, termination_batch, bootstrap=False
+        self,
+        state_batch,
+        action_batch,
+        extension_batch,
+        contact_batch,
+        termination_batch,
+        bootstrap=False,
+        loss_type="gaussian_nll",
     ):
         state_losses = []
         sequence_losses = []
@@ -202,7 +209,7 @@ class SystemDynamicsEnsemble(nn.Module):
                 ids = torch.arange(0, state_batch.shape[0], device=self.device)
 
             state_loss, sequence_loss, bound_loss, kl_loss = self.compute_state_loss(
-                self.state_heads[i], state_batch[ids], action_batch[ids]
+                self.state_heads[i], state_batch[ids], action_batch[ids], loss_type=loss_type
             )
 
             if self.auxiliary_heads is not None:
@@ -236,7 +243,9 @@ class SystemDynamicsEnsemble(nn.Module):
         termination_loss = torch.mean(torch.cat(termination_losses, dim=0), dim=0)
         return state_loss, sequence_loss, bound_loss, kl_loss, extension_loss, contact_loss, termination_loss
 
-    def compute_state_loss(self, head, state_batch, action_batch):
+    def compute_state_loss(self, head, state_batch, action_batch, loss_type="gaussian_nll"):
+        if loss_type == "gaussian_nll" and not head.output_std:
+            raise ValueError("loss_type='gaussian_nll' requires a state head with a logstd output (state_head.logstd).")
         assert (
             self.forecast_horizon + self.history_horizon == state_batch.shape[1]
             and self.forecast_horizon + self.history_horizon == action_batch.shape[1]
@@ -275,7 +284,9 @@ class SystemDynamicsEnsemble(nn.Module):
                 self.state_base.forward(x_state_batch, x_action_batch), x_state_batch
             )
 
-            state_loss, sequence_loss = self.compute_regression_loss(state_mean_pred, state_std_pred, state_target)
+            state_loss, sequence_loss = self.compute_regression_loss(
+                state_mean_pred, state_std_pred, state_target, loss_type=loss_type
+            )
             bound_loss = self.compute_bound_loss(head) if head.output_std else torch.tensor(0.0, device=self.device)
             kl_loss = self.state_base.kl_loss if self.base_cfg.type == "rssm" else torch.tensor(0.0, device=self.device)
 
@@ -393,7 +404,7 @@ class SystemDynamicsEnsemble(nn.Module):
         termination_loss = torch.mean(torch.cat(termination_losses, dim=0), dim=0)
         return extension_loss, contact_loss, termination_loss
 
-    def compute_regression_loss(self, state_mean_pred, state_std_pred, state_target, loss_type="mse"):
+    def compute_regression_loss(self, state_mean_pred, state_std_pred, state_target, loss_type="gaussian_nll"):
         if loss_type == "mse":
             if self.prediction_type == "sequence":
                 state_mean_pred_seq, state_mean_pred = state_mean_pred[:, :-1], state_mean_pred[:, -1]
