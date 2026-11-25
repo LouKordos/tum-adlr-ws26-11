@@ -55,6 +55,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "rust-just" },
 ]
 
 [package.metadata]
@@ -73,6 +74,7 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8,<10" },
     { name = "ruff", specifier = ">=0.14" },
+    { name = "rust-just", specifier = ">=1.59.0" },
 ]
 
 [[package]]
@@ -3177,6 +3179,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/ae/58/690cf56da80c8f2c8
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/d8/59894cf630d2d86882457a2a6a0a1533410c5c805bfbac6f6eb4b5aef69d/ruff-0.17.2-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c60f93fec7142dba5b8f487f94bf2f6231dae24dc11e4c48648347c8b0720004", size = 10528000, upload-time = "2026-10-22T18:37:37.88Z" },
     { url = "https://files.pythonhosted.org/packages/e4/5a/a7a640f47bb906ec8fa233ea84319d503e6dee02b59e3901bd312ebd1f9b/ruff-0.17.2-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:2d086be452eed686aa51271ecf2cbe5037956517cc6ee39a17b4489ac12f8bbe", size = 10790587, upload-time = "2026-10-22T18:37:50.191Z" },
+]
+
+[[package]]
+name = "rust-just"
+version = "1.59.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/88/83783d99d727bd319a6ce369add39513b4f6382a64a49753555adfb41e78/rust_just-1.59.0.tar.gz", hash = "sha256:0859a87e37e249594ecb56ce740dd7e97d2c2d2ecea45ca0714555b7367512c2", size = 2010105, upload-time = "2026-10-16T03:59:56.518Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/44/88bb281b264fd843e66975637ec1befc442508fc60e509800a053e5fb9fa/rust_just-1.59.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3ee47f26e3aff917107602d57a08ede20df447f78dc4f9ceb08e57a883c56eb9", size = 2428420, upload-time = "2026-10-16T03:59:44.812Z" },
+    { url = "https://files.pythonhosted.org/packages/77/93/f7a02dfe75e6488b1bc71a174bb89d93b7754d7e74601894eac5b3fbe043/rust_just-1.59.0-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:55a22dbd38fb3491d221da1e45184d09460526fae73b845eb9cdfbefcf06822b", size = 2506671, upload-time = "2026-10-16T03:59:52.706Z" },
 ]
 
 [[package]]

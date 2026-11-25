@@ -30,6 +30,7 @@ include = ["adlr_rwm*"]
 dev = [
     "pytest>=8,<10",
     "ruff>=0.14",
+    "rust-just>=1.59.0",
 ]
 
 # As per dependency resolution policy used in the Isaac Lab 3.0.0:
