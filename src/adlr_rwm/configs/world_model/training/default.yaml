@@ -71,7 +71,7 @@ logging:
       - [object_root_velocity, 2, object z velocity (m/s)]
       - [robot_joint_position, 1, joint 2 (rad)]
       - [robot_joint_position, 7, finger (m)]
-  watch_interval: 50        # gradient histograms in wandb every N steps (0 = off)
+  watch_interval: 500        # gradient histograms in wandb every N steps (0 = off)
   wandb:
     enabled: true
     project: adlr-rwm
