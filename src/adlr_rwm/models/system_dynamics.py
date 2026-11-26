@@ -44,9 +44,7 @@ class SampledForecast(NamedTuple):
 
     The variances are over the particles of each window, so they include the uncertainty that accumulates over the
     rollout. var = aleatoric_var + epistemic_var (law of total variance over the heads' particle groups), each an
-    unbiased estimate. epistemic_var subtracts the sampling noise of the heads' particle means, which would otherwise
-    add about 0.8 * aleatoric_var / (K / 5): as much as the epistemic part itself at K = 30. So for single windows it
-    can come out slightly negative; averages are unbiased.
+    unbiased estimate. epistemic_var subtracts the sampling noise of the heads' particle means.
     """
 
     particles: torch.Tensor  # [B, K, F, state_dim] sampled trajectories
@@ -415,7 +413,7 @@ class SystemDynamicsEnsemble(nn.Module):
     ) -> SampledForecast:
         """Monte Carlo forecast: num_particles sampled rollouts per window (trajectory sampling, as in PETS).
 
-        Every particle keeps one head for the whole rollout ("TS-infinity"), the same number of particles per head.
+        Every particle keeps one head for the whole rollout, the same number of particles per head.
         At each step its head predicts mean and std, the next state is drawn from that Gaussian and fed back. The
         spread of the particles is the predictive uncertainty propagated through the rollout, which forecast() can't
         show because it feeds back the mean. Same inputs and action indexing as forecast().
