@@ -26,7 +26,7 @@ from adlr_rwm.evaluation import (
     figure_to_array,
     logstd_bounds,
     mse_and_variance_over_forecast_steps,
-    pick_rollout_windows,
+    pick_rollout_scenarios,
     rollout_figure,
 )
 from adlr_rwm.models import LOSS_TERMS, SystemDynamicsEnsemble
@@ -140,24 +140,31 @@ def main(cfg: DictConfig) -> None:
         for name, dataset in eval_sets.items()
     }
     field_slices = train_set.state_field_slices
-    # Monte Carlo evaluation on a fixed random subset of the eval windows, loaded once. Random over the whole subset:
-    # its first windows would all come from the first few episodes.
+
+    def load_random_windows(dataset, num_windows: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """A fixed random subset of the windows of dataset as raw (state, action) tensors, loaded once.
+
+        Random over the whole dataset: its first windows would all come from the first few episodes.
+        """
+        generator = torch.Generator().manual_seed(tr.split.seed)
+        picked = torch.randperm(len(dataset), generator=generator)[:num_windows].sort().values
+        loader = make_dataloader(
+            Subset(dataset, picked.tolist()), **{**tr.dataloader, "shuffle": False, "drop_last": False}
+        )
+        return tuple(torch.cat(values) for values in zip(*((batch["state"], batch["action"]) for batch in loader)))
+
     sampled_eval = tr.logging.sampled_eval
     sampled_windows, num_particles = None, sampled_eval.particles_per_head * wm.ensemble_size
     if sampled_eval.windows:
-        generator = torch.Generator().manual_seed(tr.split.seed)
-        picked = torch.randperm(len(eval_sets["val"]), generator=generator)[: sampled_eval.windows].sort().values
-        picked_set = Subset(eval_sets["val"], picked.tolist())
-        loader = make_dataloader(picked_set, **{**tr.dataloader, "shuffle": False, "drop_last": False})
-        sampled_windows = tuple(torch.cat(values) for values in zip(*((b["state"], b["action"]) for b in loader)))
-        log.info("Monte Carlo evaluations: %d windows x %d particles", len(picked), num_particles)
-    # The same example windows are plotted at every evaluation, picked from the first val batches
+        sampled_windows = load_random_windows(eval_sets["val"], sampled_eval.windows)
+        log.info("Monte Carlo evaluations: %d windows x %d particles", len(sampled_windows[0]), num_particles)
+    # The same example windows are plotted at every evaluation, per scenario
     plots = tr.logging.rollout_plots
-    rollout_windows = (
-        pick_rollout_windows(islice(loaders["val"], 4), field_slices, plots.num_windows, wm.history_horizon)
-        if plots.num_windows
-        else None
-    )
+    rollout_windows = {}
+    if plots.num_windows:
+        pool = load_random_windows(eval_sets["val"], plots.pool_windows)
+        rollout_windows = pick_rollout_scenarios(*pool, field_slices, plots.num_windows, wm.history_horizon)
+        log.info("Rollout plots: %s", ", ".join(f"{name} ({len(s)})" for name, (s, _) in rollout_windows.items()))
 
     optimizers = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
     optimizer = optimizers[tr.optimizer.type](
@@ -214,21 +221,12 @@ def main(cfg: DictConfig) -> None:
             charts = mse_and_variance_over_forecast_steps(mse_curves, curves, step, "forecast(): single-step variance")
         logged |= {f"val_{name}": chart for name, chart in charts.items()}
         logged["epoch"] = epoch
-        if rollout_windows is not None:
-            particles = plots.particles_per_head * wm.ensemble_size
-            fig = rollout_figure(
-                model,
-                *rollout_windows,
-                normalize,
-                stats,
-                field_slices,
-                plots.dims,
-                particles,
-                plots.trajectories,
-                plots.dpi,
-            )
-            caption = f"step {step}. Bands: ±1σ/±2σ over {particles} sampled rollouts (sample_forecast)"
-            logged["val_rollouts/examples"] = wandb.Image(figure_to_array(fig), caption=caption)
+        particles = plots.particles_per_head * wm.ensemble_size
+        for scenario, windows in rollout_windows.items():
+            settings = (plots.dims, particles, plots.trajectories, plots.dpi)
+            fig = rollout_figure(model, *windows, normalize, stats, field_slices, *settings)
+            caption = f"step {step}, {scenario}. Bands: ±1σ/±2σ over {particles} sampled rollouts (sample_forecast)"
+            logged[f"val_rollouts/{scenario}"] = wandb.Image(figure_to_array(fig), caption=caption)
         run.log(logged, step=step)
         is_best = val[tr.checkpoint.best_metric] < best
         if is_best:

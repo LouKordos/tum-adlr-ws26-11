@@ -8,23 +8,43 @@ from matplotlib.figure import Figure
 
 from .metrics import GAUSSIAN_COVERAGE, fixed_rng
 
+# Rollout plot scenarios, from the object's linear speed in m/s
+STILL_SPEED = 0.02  # below: the object rests
+MOVING_SPEED = 0.2  # above: the object clearly moves
+IMPACT_QUANTILE = 0.97  # impact: the 3% of windows with the largest one-step velocity change in the forecast
 
-def pick_rollout_windows(batches, field_slices: dict[str, slice], num_windows: int, history_horizon: int):
-    """Example windows for the rollout plots: those where the object moves most during the forecast.
 
-    Returns raw (unnormalized) state and action windows. Neighbouring windows overlap (same episode, shifted by one
-    step), so picked windows are at least a sequence length apart in the loader order.
+def pick_rollout_scenarios(
+    state, action, field_slices: dict[str, slice], num_windows: int, history_horizon: int
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Example windows for the rollout plots: {scenario: (state, action)}, num_windows each.
+
+    Drawn at random (fixed seed) from the windows that qualify for a scenario, not the most extreme ones, so they are
+    typical for it. state/action: a pool of raw (unnormalized) windows [windows, H + F, dim], e.g. random val windows.
+    lift_off: the object is still throughout the history and moves in the forecast (grasped, then lifted).
+    in_motion: the object already moves at the last history step, so the history contains the dynamics.
+    impact: the largest jumps of the object velocity in the forecast (landing, bouncing): the rare large errors.
+    random: any window. Mostly a still object, like most of the data and so the average metrics.
+    A scenario without qualifying windows is left out.
     """
-    state, action = (torch.cat(values) for values in zip(*((batch["state"], batch["action"]) for batch in batches)))
-    position = state[:, history_horizon - 1 :, field_slices["object_root_pose"]][..., :3]  # last history step onwards
-    motion = (position - position[:, :1]).norm(dim=-1).amax(dim=1)  # largest distance from the start of the forecast
-    picked = []
-    for index in motion.argsort(descending=True).tolist():
-        if all(abs(index - other) > state.shape[1] for other in picked):
-            picked.append(index)
-        if len(picked) == num_windows:
-            break
-    return state[picked], action[picked]
+    H = history_horizon
+    velocity = state[..., field_slices["object_root_velocity"]]  # linear (m/s) and angular (rad/s)
+    speed = velocity[..., :3].norm(dim=-1)  # [windows, H + F]
+    jump = velocity[:, H - 1 :].diff(dim=1).norm(dim=-1).amax(dim=1)  # largest one-step change, linear and angular
+    qualifies = {
+        "lift_off": (speed[:, :H].amax(dim=1) < STILL_SPEED) & (speed[:, H:].amax(dim=1) > MOVING_SPEED),
+        "in_motion": speed[:, H - 1] > MOVING_SPEED,
+        "impact": jump >= jump.quantile(IMPACT_QUANTILE),
+        "random": torch.ones(len(state), dtype=torch.bool),
+    }
+    generator = torch.Generator().manual_seed(0)
+    picked = {}
+    for scenario, mask in qualifies.items():
+        candidates = mask.nonzero().squeeze(1)
+        if len(candidates):
+            chosen = candidates[torch.randperm(len(candidates), generator=generator)[:num_windows]]
+            picked[scenario] = (state[chosen], action[chosen])
+    return picked
 
 
 @torch.no_grad()
