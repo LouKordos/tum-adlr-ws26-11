@@ -27,17 +27,18 @@ def logstd_bounds(model, field_slices: dict[str, slice]) -> dict[str, float]:
 @torch.no_grad()
 def evaluate(
     model, batches, normalize, loss_type: str, loss_weights, field_slices: dict[str, slice]
-) -> tuple[dict[str, float], dict[str, list[float]]]:
+) -> tuple[dict[str, float], dict[str, dict[str, list[float]]]]:
     """Mean metrics over batches, and curves over the forecast horizon.
 
     Metrics: *_loss: configured loss. mse*: deterministic forecast error in normalized units.
-    Curves (one value per forecast step, mean over windows and state dims, normalized units): mse, and the predicted
-    variance split into aleatoric_var + epistemic_var. With calibrated uncertainty, mse ≈ total predicted variance.
+    Curves: {"all" or state field: {"mse", "aleatoric_var", "epistemic_var": one value per forecast step}}, mean over
+    windows and over all state dims or the dims of that field, in normalized units. aleatoric_var + epistemic_var is
+    the predicted variance: with calibrated uncertainty, mse ≈ predicted variance.
     """
     model.eval()
     sums, sq_err, n = defaultdict(float), 0.0, 0
     window_err, aleatoric, epistemic = [], [], []
-    var_sums = {"aleatoric_var": 0.0, "epistemic_var": 0.0}  # [forecast step], summed over windows
+    var_sums = {"aleatoric_var": 0.0, "epistemic_var": 0.0}  # [forecast step, state dim], summed over windows
     # compute_loss samples from the predicted std, a fixed seed makes losses comparable between evaluations
     with torch.random.fork_rng(devices=[model.device] if "cuda" in str(model.device) else []):
         torch.manual_seed(0)
@@ -54,7 +55,7 @@ def evaluate(
             aleatoric.append(forecast.aleatoric.mean(dim=1))
             epistemic.append(forecast.epistemic.mean(dim=1))
             for name, value in var_sums.items():
-                var_sums[name] = value + getattr(forecast, name).mean(dim=2).sum(dim=0)
+                var_sums[name] = value + getattr(forecast, name).sum(dim=0)
             n += len(state)
     model.train()
 
@@ -70,5 +71,9 @@ def evaluate(
         metrics[name] = values.mean().item()
         # Does the model know when it is wrong? Correlation of per-window uncertainty with per-window error
         metrics[f"{name}_error_corr"] = torch.corrcoef(torch.stack([values, window_err]))[0, 1].item()
-    curves = {"mse": mse.mean(dim=1).tolist()} | {name: (value / n).tolist() for name, value in var_sums.items()}
+    per_dim = {"mse": mse} | {name: value / n for name, value in var_sums.items()}  # each [forecast step, state dim]
+    curves = {
+        group: {name: values[:, dims].mean(dim=1).tolist() for name, values in per_dim.items()}
+        for group, dims in ({"all": slice(None)} | field_slices).items()
+    }
     return metrics, curves

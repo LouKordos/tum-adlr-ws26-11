@@ -189,9 +189,9 @@ def main(cfg: DictConfig) -> None:
         eval_start = time.perf_counter()
         val_batches = islice(loaders["val"], tr.limit_batches)
         val, curves = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
-        mse_curves.append((step, curves["mse"]))
+        mse_curves.append((step, curves["all"]["mse"]))
         charts = mse_and_variance_over_forecast_steps(mse_curves, curves, step)
-        logged = wandb_keys("val", val) | {f"val_horizon/{name}": chart for name, chart in charts.items()}
+        logged = wandb_keys("val", val) | {f"val_{name}": chart for name, chart in charts.items()}
         logged["epoch"] = epoch
         if rollout_windows is not None:
             fig = rollout_figure(model, *rollout_windows, normalize, stats, field_slices, plots.dims)

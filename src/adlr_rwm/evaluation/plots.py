@@ -73,29 +73,38 @@ def figure_to_array(fig: Figure) -> np.ndarray:
 
 
 def mse_and_variance_over_forecast_steps(
-    mse_curves: list[tuple[int, list[float]]], curves: dict[str, list[float]], step: int
+    mse_curves: list[tuple[int, list[float]]], curves: dict[str, dict[str, list[float]]], step: int
 ) -> dict:
-    """wandb charts over the forecast horizon, from the curves of evaluate().
+    """wandb charts over the forecast horizon, from the curves of evaluate(). Keys go after the split, e.g. "val_".
 
-    mse_per_eval: the MSE of every evaluation so far, one line each (mse_curves: (training step, MSE per forecast
-    step)). wandb shows the latest version of a chart, so it has to contain all evaluations.
-    mse_vs_variance: MSE and predicted variance of the latest evaluation. They match if the uncertainty is calibrated.
+    horizon/mse_per_eval: the MSE (mean over all dims) of every evaluation so far, one line each (mse_curves:
+        (training step, MSE per forecast step)). wandb shows the latest version of a chart, so it has to contain all
+        evaluations.
+    horizon/mse_vs_variance: MSE and predicted variance of the latest evaluation, mean over all dims. They match if
+        the uncertainty is calibrated.
+    horizon_per_field/<field>: the same for the dims of each state field, whose errors differ by orders of magnitude.
     """
-    horizon = list(range(1, len(curves["mse"]) + 1))
-    predicted_var = [a + e for a, e in zip(curves["aleatoric_var"], curves["epistemic_var"], strict=True)]
-    return {
-        "mse_per_eval": wandb.plot.line_series(
+    horizon = list(range(1, len(curves["all"]["mse"]) + 1))
+
+    def mse_vs_variance(curve: dict[str, list[float]], dims: str):
+        predicted_var = [a + e for a, e in zip(curve["aleatoric_var"], curve["epistemic_var"], strict=True)]
+        return wandb.plot.line_series(
+            horizon,
+            [curve["mse"], predicted_var, curve["aleatoric_var"], curve["epistemic_var"]],
+            keys=["MSE", "predicted variance", "aleatoric variance", "epistemic variance"],
+            title=f"Val MSE vs predicted variance over the forecast horizon, {dims} (step {step})",
+            xname="forecast step",
+        )
+
+    charts = {
+        "horizon/mse_per_eval": wandb.plot.line_series(
             horizon,
             [curve for _, curve in mse_curves],
             keys=[f"step {eval_step}" for eval_step, _ in mse_curves],
             title="Val MSE over the forecast horizon, one line per evaluation",
             xname="forecast step",
         ),
-        "mse_vs_variance": wandb.plot.line_series(
-            horizon,
-            [curves["mse"], predicted_var, curves["aleatoric_var"], curves["epistemic_var"]],
-            keys=["MSE", "predicted variance", "aleatoric variance", "epistemic variance"],
-            title=f"Val MSE vs predicted variance over the forecast horizon (step {step})",
-            xname="forecast step",
-        ),
+        "horizon/mse_vs_variance": mse_vs_variance(curves["all"], "all dims"),
     }
+    charts |= {f"horizon_per_field/{group}": mse_vs_variance(c, group) for group, c in curves.items() if group != "all"}
+    return charts
