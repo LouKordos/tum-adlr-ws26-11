@@ -17,6 +17,7 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR, StepLR
+from torch.utils.data import Subset
 
 from adlr_rwm.data import RWMDataset, make_dataloader
 from adlr_rwm.models import SystemDynamicsEnsemble
@@ -188,12 +189,21 @@ def main(cfg: DictConfig) -> None:
         state, action = ((batch[key].to(device, non_blocking=True) - stats[key][0]) / stats[key][1] for key in stats)
         return state, action
 
+    # Evaluations during training use a fixed random subset of the val windows: cheap enough to run often, and the same
+    # windows every time so evaluations stay comparable. Sorted, so episodes are still read in order.
+    eval_sets = dict(datasets)
+    num_eval_windows = tr.logging.eval_windows
+    if num_eval_windows and num_eval_windows < len(datasets["val"]):
+        generator = torch.Generator().manual_seed(tr.split.seed)
+        indices = torch.randperm(len(datasets["val"]), generator=generator)[:num_eval_windows].sort().values
+        eval_sets["val"] = Subset(datasets["val"], indices.tolist())
+        log.info("val evaluations use %d of %d windows", num_eval_windows, len(datasets["val"]))
     # Only the train loader shuffles; evaluation never drops or reorders data
     loaders = {
         name: make_dataloader(
             dataset, **{**tr.dataloader, **({} if name == "train" else {"shuffle": False, "drop_last": False})}
         )
-        for name, dataset in datasets.items()
+        for name, dataset in eval_sets.items()
     }
     field_slices = state_field_slices(recording, train_set.state_fields)
 
@@ -231,10 +241,38 @@ def main(cfg: DictConfig) -> None:
             run_dir / name,
         )
 
+    last_eval_step = None
+
+    def validate() -> float:
+        """Evaluate on the val windows, log the metrics and keep the best checkpoint. Returns the time it took."""
+        nonlocal best, last_eval_step
+        eval_start = time.perf_counter()
+        val_batches = islice(loaders["val"], tr.limit_batches)
+        val = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
+        run.log({f"val/{key}": value for key, value in val.items()} | {"epoch": epoch}, step=step)
+        is_best = val[tr.checkpoint.best_metric] < best
+        if is_best:
+            best = val[tr.checkpoint.best_metric]
+            run.summary.update(
+                {"best/epoch": epoch, "best/step": step, **{f"best/val_{key}": value for key, value in val.items()}}
+            )
+            if tr.checkpoint.keep_best:
+                save_checkpoint("best.pt", val=val)
+        steps = " ".join(f"{val[f'mse_step_{k + 1}']:.3g}" for k in range(wm.forecast_horizon))
+        fields = " ".join(f"{name} {val[f'mse_{name}']:.3g}" for name in field_slices)
+        log.info(
+            f"{tr.loss.type} seed {cfg.seed} | epoch {epoch} step {step} val | loss {val['loss']:.4g} | mse {val['mse']:.4g} (per step: {steps}) | {fields} | "
+            f"epistemic-error corr {val['epistemic_error_corr']:.2f} | best {tr.checkpoint.best_metric} "
+            f"{best:.4g}{' (new)' if is_best else ''} | eval {hms(time.perf_counter() - eval_start)}, "
+            f"total {hms(time.perf_counter() - start)}"
+        )
+        last_eval_step = step
+        return time.perf_counter() - eval_start
+
     window, window_steps, data_time, window_start = defaultdict(float), 0, 0.0, time.perf_counter()
     for epoch in range(1, tr.num_epochs + 1):
         model.train()
-        epoch_start = batch_end = time.perf_counter()
+        batch_end = time.perf_counter()
         for i, batch in enumerate(islice(loaders["train"], tr.limit_batches), start=1):
             data_time += time.perf_counter() - batch_end  # time spent waiting for the DataLoader
             state, action = normalize(batch)
@@ -277,30 +315,14 @@ def main(cfg: DictConfig) -> None:
                     f"total {hms(remaining / rate)}"
                 )
                 window, window_steps, data_time, window_start = defaultdict(float), 0, 0.0, time.perf_counter()
+            if tr.logging.eval_interval and step % tr.logging.eval_interval == 0:
+                window_start += validate()  # evaluation doesn't count towards the training speed
             batch_end = time.perf_counter()
         scheduler.step()
         pause_start = time.perf_counter()  # evaluation and checkpointing don't count towards the training speed
 
-        if epoch % tr.logging.eval_interval == 0 or epoch == tr.num_epochs:
-            eval_start = time.perf_counter()
-            val_batches = islice(loaders["val"], tr.limit_batches)
-            val = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
-            run.log({f"val/{key}": value for key, value in val.items()} | {"epoch": epoch}, step=step)
-            is_best = val[tr.checkpoint.best_metric] < best
-            if is_best:
-                best = val[tr.checkpoint.best_metric]
-                run.summary.update({"best/epoch": epoch, **{f"best/val_{key}": value for key, value in val.items()}})
-                if tr.checkpoint.keep_best:
-                    save_checkpoint("best.pt", val=val)
-            steps = " ".join(f"{val[f'mse_step_{k + 1}']:.3g}" for k in range(wm.forecast_horizon))
-            fields = " ".join(f"{name} {val[f'mse_{name}']:.3g}" for name in field_slices)
-            log.info(
-                f"{tr.loss.type} seed {cfg.seed} | epoch {epoch} val | loss {val['loss']:.4g} | mse {val['mse']:.4g} (per step: {steps}) | {fields} | "
-                f"epistemic-error corr {val['epistemic_error_corr']:.2f} | best {tr.checkpoint.best_metric} "
-                f"{best:.4g}{' (new)' if is_best else ''} | train {hms(eval_start - epoch_start)}, "
-                f"eval {hms(time.perf_counter() - eval_start)}, total {hms(time.perf_counter() - start)}"
-            )
-
+        if epoch == tr.num_epochs and last_eval_step != step:  # the final model is always evaluated
+            validate()
         save_checkpoint("last.pt")
         if epoch % tr.checkpoint.interval == 0:
             save_checkpoint(f"epoch_{epoch:04d}.pt")

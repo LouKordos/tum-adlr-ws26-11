@@ -57,7 +57,8 @@ loss:
 
 logging:
   log_interval: 50            # optimizer steps
-  eval_interval: 1            # epochs
+  eval_interval: 1000         # optimizer steps, plus once after the last step (0 = only then)
+  eval_windows: 50000         # fixed random subset of the val windows (~370k) used by every evaluation (null = all)
   watch_interval: 50        # gradient histograms in wandb every N steps (0 = off)
   wandb:
     enabled: true
