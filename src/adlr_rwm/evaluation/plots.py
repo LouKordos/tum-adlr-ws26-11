@@ -29,7 +29,7 @@ def pick_rollout_windows(batches, field_slices: dict[str, slice], num_windows: i
 
 @torch.no_grad()
 def rollout_figure(
-    model, state, action, normalize, stats, field_slices: dict[str, slice], dims, num_particles, num_trajectories
+    model, state, action, normalize, stats, field_slices: dict[str, slice], dims, num_particles, num_trajectories, dpi
 ):
     """Ground truth vs Monte Carlo forecast (sample_forecast), one row per window, one column per dim.
 
@@ -37,7 +37,8 @@ def rollout_figure(
     rollout. Also num_trajectories randomly drawn particles. With a fixed seed, so the same random numbers at every
     evaluation: changes between evaluations come from the model.
     state/action: raw windows [windows, H + F, dim]. dims: (state field, index within the field, axis label).
-    Plotted in physical units. A plain Figure (not pyplot), so nothing has to be closed and no backend is needed.
+    Plotted in physical units, 4 x 2.4 inches per panel at dpi pixels per inch. A plain Figure (not pyplot), so
+    nothing has to be closed and no backend is needed.
     """
     model.eval()
     with fixed_rng(model.device):
@@ -53,7 +54,7 @@ def rollout_figure(
 
     H, F = model.history_horizon, model.forecast_horizon
     t_history, t_forecast = np.arange(-H + 1, 1), np.arange(0, F + 1)  # step 0: last history step
-    fig = Figure(figsize=(4 * len(dims), 2.4 * len(state)), layout="constrained")
+    fig = Figure(figsize=(4 * len(dims), 2.4 * len(state)), dpi=dpi, layout="constrained")
     axes = fig.subplots(len(state), len(dims), squeeze=False)
     for row in range(len(state)):
         for col, (field, index, label) in enumerate(dims):

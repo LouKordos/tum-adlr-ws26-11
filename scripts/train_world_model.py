@@ -217,7 +217,15 @@ def main(cfg: DictConfig) -> None:
         if rollout_windows is not None:
             particles = plots.particles_per_head * wm.ensemble_size
             fig = rollout_figure(
-                model, *rollout_windows, normalize, stats, field_slices, plots.dims, particles, plots.trajectories
+                model,
+                *rollout_windows,
+                normalize,
+                stats,
+                field_slices,
+                plots.dims,
+                particles,
+                plots.trajectories,
+                plots.dpi,
             )
             caption = f"step {step}. Bands: ±1σ/±2σ over {particles} sampled rollouts (sample_forecast)"
             logged["val_rollouts/examples"] = wandb.Image(figure_to_array(fig), caption=caption)
