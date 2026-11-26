@@ -20,7 +20,9 @@ from torch.utils.data import Subset
 
 from adlr_rwm.data import RWMDataset, make_dataloader, make_split
 from adlr_rwm.evaluation import (
+    coverage_over_forecast_steps,
     evaluate,
+    evaluate_sampled,
     figure_to_array,
     logstd_bounds,
     mse_and_variance_over_forecast_steps,
@@ -138,6 +140,17 @@ def main(cfg: DictConfig) -> None:
         for name, dataset in eval_sets.items()
     }
     field_slices = train_set.state_field_slices
+    # Monte Carlo evaluation on a fixed random subset of the eval windows, loaded once. Random over the whole subset:
+    # its first windows would all come from the first few episodes.
+    sampled_eval = tr.logging.sampled_eval
+    sampled_windows, num_particles = None, sampled_eval.particles_per_head * wm.ensemble_size
+    if sampled_eval.windows:
+        generator = torch.Generator().manual_seed(tr.split.seed)
+        picked = torch.randperm(len(eval_sets["val"]), generator=generator)[: sampled_eval.windows].sort().values
+        picked_set = Subset(eval_sets["val"], picked.tolist())
+        loader = make_dataloader(picked_set, **{**tr.dataloader, "shuffle": False, "drop_last": False})
+        sampled_windows = tuple(torch.cat(values) for values in zip(*((b["state"], b["action"]) for b in loader)))
+        log.info("Monte Carlo evaluations: %d windows x %d particles", len(picked), num_particles)
     # The same example windows are plotted at every evaluation, picked from the first val batches
     plots = tr.logging.rollout_plots
     rollout_windows = (
@@ -190,12 +203,23 @@ def main(cfg: DictConfig) -> None:
         val_batches = islice(loaders["val"], tr.limit_batches)
         val, curves = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
         mse_curves.append((step, curves["all"]["mse"]))
-        charts = mse_and_variance_over_forecast_steps(mse_curves, curves, step)
-        logged = wandb_keys("val", val) | {f"val_{name}": chart for name, chart in charts.items()}
+        logged = wandb_keys("val", val)
+        if sampled_windows is not None:
+            sampled, sampled_curves = evaluate_sampled(model, *sampled_windows, normalize, num_particles, field_slices)
+            source = f"{num_particles} particles x {len(sampled_windows[0])} windows"
+            charts = mse_and_variance_over_forecast_steps(mse_curves, sampled_curves, step, source)
+            charts |= coverage_over_forecast_steps(sampled_curves, step, source)
+            logged |= {f"val_sampled/{key}": value for key, value in sampled.items()}
+        else:
+            charts = mse_and_variance_over_forecast_steps(mse_curves, curves, step, "forecast(): single-step variance")
+        logged |= {f"val_{name}": chart for name, chart in charts.items()}
         logged["epoch"] = epoch
         if rollout_windows is not None:
-            fig = rollout_figure(model, *rollout_windows, normalize, stats, field_slices, plots.dims)
-            caption = f"step {step}. σ: predictive std of the deterministic forecast (single-step, not accumulated)"
+            particles = plots.particles_per_head * wm.ensemble_size
+            fig = rollout_figure(
+                model, *rollout_windows, normalize, stats, field_slices, plots.dims, particles, plots.trajectories
+            )
+            caption = f"step {step}. Bands: ±1σ/±2σ over {particles} sampled rollouts (sample_forecast)"
             logged["val_rollouts/examples"] = wandb.Image(figure_to_array(fig), caption=caption)
         run.log(logged, step=step)
         is_best = val[tr.checkpoint.best_metric] < best
@@ -208,6 +232,8 @@ def main(cfg: DictConfig) -> None:
                 save_checkpoint("best.pt", val=val)
         steps = " ".join(f"{val[f'mse_step_{k + 1}']:.3g}" for k in range(wm.forecast_horizon))
         fields = " ".join(f"{name} {val[f'mse_{name}']:.3g}" for name in field_slices)
+        if sampled_windows is not None:
+            fields += f" | coverage ±1σ {sampled['coverage_1sigma']:.0%} ±2σ {sampled['coverage_2sigma']:.0%}"
         log.info(
             f"{tr.loss.type} seed {cfg.seed} | epoch {epoch} step {step} val | loss {val['loss']:.4g} | mse {val['mse']:.4g} (per step: {steps}) | {fields} | "
             f"epistemic-error corr {val['epistemic_error_corr']:.2f} | best {tr.checkpoint.best_metric} "

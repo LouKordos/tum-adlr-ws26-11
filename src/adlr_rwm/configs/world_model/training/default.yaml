@@ -59,8 +59,13 @@ logging:
   log_interval: 50            # optimizer steps
   eval_interval: 1000         # optimizer steps, plus once after the last step (0 = only then)
   eval_windows: 50000         # fixed random subset of the val windows (~370k) used by every evaluation (null = all)
+  sampled_eval:               # Monte Carlo rollouts (sample_forecast): calibration of the uncertainty propagated over the rollout
+    windows: 2048             # fixed random subset of the eval windows above (0 = off: calibration charts from forecast())
+    particles_per_head: 12    # particles per window = particles_per_head * ensemble_size
   rollout_plots:              # example val windows plotted at every evaluation to compare ground truth, prediction, and sigma bands
     num_windows: 3            # picked where the object moves the most during the forecast (0 = off)
+    particles_per_head: 200   # more than sampled_eval because the CI bands of a single window are obv not averaged over windows
+    trajectories: 5           # number of randomly drawn particles plotted as lines
     dims:                     # [state field, index within the field, axis label]. Franka joints: 0-6 arm, 7-8 fingers
       - [object_root_pose, 2, object z (m)]
       - [object_root_velocity, 2, object z velocity (m/s)]
