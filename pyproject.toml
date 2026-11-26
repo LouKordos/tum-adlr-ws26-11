@@ -16,6 +16,7 @@ dependencies = [
     "imgui-bundle>=1.92.601",
     "hydra-core>=1.4.0rc3",
     "omegaconf>=2.4.1rc1",
+    "matplotlib>=3.10",
 ]
 
 # Isaac Lab discovers external task packages through this group.

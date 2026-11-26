@@ -59,6 +59,13 @@ logging:
   log_interval: 50            # optimizer steps
   eval_interval: 1000         # optimizer steps, plus once after the last step (0 = only then)
   eval_windows: 50000         # fixed random subset of the val windows (~370k) used by every evaluation (null = all)
+  rollout_plots:              # example val windows plotted at every evaluation to compare ground truth, prediction, and sigma bands
+    num_windows: 3            # picked where the object moves the most during the forecast (0 = off)
+    dims:                     # [state field, index within the field, axis label]. Franka joints: 0-6 arm, 7-8 fingers
+      - [object_root_pose, 2, object z (m)]
+      - [object_root_velocity, 2, object z velocity (m/s)]
+      - [robot_joint_position, 1, joint 2 (rad)]
+      - [robot_joint_position, 7, finger (m)]
   watch_interval: 50        # gradient histograms in wandb every N steps (0 = off)
   wandb:
     enabled: true
