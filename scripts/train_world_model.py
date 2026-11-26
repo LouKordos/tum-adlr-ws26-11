@@ -77,11 +77,17 @@ def logstd_bounds(model, field_slices: dict[str, slice]) -> dict[str, float]:
 @torch.no_grad()
 def evaluate(
     model, batches, normalize, loss_type: str, loss_weights, field_slices: dict[str, slice]
-) -> dict[str, float]:
-    """Mean metrics over batches. *_loss: configured loss. mse*: deterministic forecast error in normalized units."""
+) -> tuple[dict[str, float], dict[str, list[float]]]:
+    """Mean metrics over batches, and curves over the forecast horizon.
+
+    Metrics: *_loss: configured loss. mse*: deterministic forecast error in normalized units.
+    Curves (one value per forecast step, mean over windows and state dims, normalized units): mse, and the predicted
+    variance split into aleatoric_var + epistemic_var. With calibrated uncertainty, mse ≈ total predicted variance.
+    """
     model.eval()
     sums, sq_err, n = defaultdict(float), 0.0, 0
     window_err, aleatoric, epistemic = [], [], []
+    var_sums = {"aleatoric_var": 0.0, "epistemic_var": 0.0}  # [forecast step], summed over windows
     # compute_loss samples from the predicted std, a fixed seed makes losses comparable between evaluations
     with torch.random.fork_rng(devices=[model.device] if "cuda" in str(model.device) else []):
         torch.manual_seed(0)
@@ -91,12 +97,14 @@ def evaluate(
             sums["loss"] += sum(weight * terms[name] for name, weight in loss_weights.items()) * len(state)
             for name in loss_weights:
                 sums[f"{name}_loss"] += terms[name] * len(state)
-            means, aleatoric_i, epistemic_i = model.forecast(state, action)
-            err = (means - state[:, model.history_horizon :]).square()  # [batch, forecast step, state dim]
+            forecast = model.forecast(state, action)
+            err = (forecast.mean - state[:, model.history_horizon :]).square()  # [batch, forecast step, state dim]
             sq_err = sq_err + err.sum(dim=0)
             window_err.append(err.mean(dim=(1, 2)))
-            aleatoric.append(aleatoric_i.mean(dim=1))
-            epistemic.append(epistemic_i.mean(dim=1))
+            aleatoric.append(forecast.aleatoric.mean(dim=1))
+            epistemic.append(forecast.epistemic.mean(dim=1))
+            for name, value in var_sums.items():
+                var_sums[name] = value + getattr(forecast, name).mean(dim=2).sum(dim=0)
             n += len(state)
     model.train()
 
@@ -105,12 +113,15 @@ def evaluate(
     metrics["mse"] = mse.mean().item()  # headline number: all steps and dims, comparable across loss types
     metrics |= {f"mse_step_{k + 1}": value.item() for k, value in enumerate(mse.mean(dim=1))}
     metrics |= {f"mse_{name}": mse[:, dims].mean().item() for name, dims in field_slices.items()}
+    # How much the error grows from the first to the last forecast step (compounding errors)
+    metrics["mse_growth"] = metrics[f"mse_step_{model.forecast_horizon}"] / metrics["mse_step_1"]
     window_err = torch.cat(window_err)
     for name, values in (("aleatoric", torch.cat(aleatoric)), ("epistemic", torch.cat(epistemic))):
         metrics[name] = values.mean().item()
         # Does the model know when it is wrong? Correlation of per-window uncertainty with per-window error
         metrics[f"{name}_error_corr"] = torch.corrcoef(torch.stack([values, window_err]))[0, 1].item()
-    return metrics
+    curves = {"mse": mse.mean(dim=1).tolist()} | {name: (value / n).tolist() for name, value in var_sums.items()}
+    return metrics, curves
 
 
 def wandb_keys(split: str, metrics: dict[str, float]) -> dict[str, float]:
@@ -250,14 +261,37 @@ def main(cfg: DictConfig) -> None:
         )
 
     last_eval_step = None
+    mse_curves = []  # (training step, val MSE per forecast step) of every evaluation, for the horizon chart
 
     def validate() -> float:
         """Evaluate on the val windows, log the metrics and keep the best checkpoint. Returns the time it took."""
         nonlocal best, last_eval_step
         eval_start = time.perf_counter()
         val_batches = islice(loaders["val"], tr.limit_batches)
-        val = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
-        run.log(wandb_keys("val", val) | {"epoch": epoch}, step=step)
+        val, curves = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
+        # Charts over the forecast horizon. wandb shows the latest version of each, so the MSE chart is logged with
+        # the curves of all evaluations so far.
+        mse_curves.append((step, curves["mse"]))
+        horizon = list(range(1, wm.forecast_horizon + 1))
+        predicted_var = [a + e for a, e in zip(curves["aleatoric_var"], curves["epistemic_var"], strict=True)]
+        logged = wandb_keys("val", val) | {
+            "epoch": epoch,
+            "val_horizon/mse_per_eval": wandb.plot.line_series(
+                horizon,
+                [curve for _, curve in mse_curves],
+                keys=[f"step {eval_step}" for eval_step, _ in mse_curves],
+                title="Val MSE over the forecast horizon, one line per evaluation",
+                xname="forecast step",
+            ),
+            "val_horizon/mse_vs_variance": wandb.plot.line_series(
+                horizon,
+                [curves["mse"], predicted_var, curves["aleatoric_var"], curves["epistemic_var"]],
+                keys=["MSE", "predicted variance", "aleatoric variance", "epistemic variance"],
+                title=f"Val MSE vs predicted variance over the forecast horizon (step {step})",
+                xname="forecast step",
+            ),
+        }
+        run.log(logged, step=step)
         is_best = val[tr.checkpoint.best_metric] < best
         if is_best:
             best = val[tr.checkpoint.best_metric]
@@ -339,7 +373,7 @@ def main(cfg: DictConfig) -> None:
     # Test once, with the selected checkpoint. Never use it for decisions.
     checkpoint = run_dir / ("best.pt" if (run_dir / "best.pt").exists() else "last.pt")
     model.load_state_dict(torch.load(checkpoint, map_location=device)["model"])
-    test = evaluate(
+    test, _ = evaluate(
         model, islice(loaders["test"], tr.limit_batches), normalize, tr.loss.type, loss_weights, field_slices
     )
     run.log(wandb_keys("test", test), step=step)

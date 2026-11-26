@@ -13,11 +13,27 @@
 # We should consider if this is worth integrating (the source repo doesn't)
 
 
+from typing import NamedTuple
+
 import torch
 from omegaconf import DictConfig
 from torch import nn
 
 from .architectures import MLPAuxiliaryHead, MLPBase, MLPStateHead, RNNBase
+
+
+class Forecast(NamedTuple):
+    """Output of SystemDynamicsEnsemble.forecast(), in normalized state units.
+
+    The ensemble is treated as an equally weighted mixture of the heads' Gaussians, so the total predictive variance
+    of each state dim is aleatoric_var + epistemic_var.
+    """
+
+    mean: torch.Tensor  # [B, F, state_dim] ensemble mean
+    aleatoric: torch.Tensor  # [B, F] predicted std, mean over heads, summed over dims (as returned by forward())
+    epistemic: torch.Tensor  # [B, F] std of the head means, summed over dims (as returned by forward())
+    aleatoric_var: torch.Tensor  # [B, F, state_dim] predicted variance, mean over heads
+    epistemic_var: torch.Tensor  # [B, F, state_dim] variance of the head means
 
 
 class SystemDynamicsEnsemble(nn.Module):
@@ -116,16 +132,8 @@ class SystemDynamicsEnsemble(nn.Module):
                     f"got T={x_state_batch.shape[1]}. Call model.reset() first if starting a new sequence."
                 )
 
-        state_means, state_stds, extensions, contacts, terminations = [], [], [], [], []
-        state_base_output = self.state_base(x_state_batch, x_action_batch)
-
-        for head in self.state_heads:
-            state_mean, state_std = head(state_base_output, x_state_batch)
-            if self.prediction_type == "sequence":
-                state_mean = state_mean[:, -1]
-                state_std = state_std[:, -1]
-            state_means.append(state_mean.unsqueeze(0))
-            state_stds.append(state_std.unsqueeze(0))
+        extensions, contacts, terminations = [], [], []
+        state_means, state_stds = self._state_head_outputs(x_state_batch, x_action_batch)
 
         auxiliary_base_output = self.auxiliary_base(x_state_batch, x_action_batch)
         for head in self.auxiliary_heads:
@@ -138,8 +146,6 @@ class SystemDynamicsEnsemble(nn.Module):
             contacts.append(contact.unsqueeze(0) if contact is not None else None)
             terminations.append(termination.unsqueeze(0) if termination is not None else None)
 
-        state_means = torch.cat(state_means, dim=0)
-        state_stds = torch.cat(state_stds, dim=0)
         extensions = torch.cat(extensions, dim=0) if self.extension_dim > 0 else None
         contacts = torch.cat(contacts, dim=0) if self.contact_dim > 0 else None
         terminations = torch.cat(terminations, dim=0) if self.termination_dim > 0 else None
@@ -181,6 +187,19 @@ class SystemDynamicsEnsemble(nn.Module):
             output_contacts,
             output_terminations,
         )
+
+    def _state_head_outputs(self, x_state_batch, x_action_batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Predicted mean and std of every state head, [ensemble, B, state_dim] each."""
+        state_base_output = self.state_base(x_state_batch, x_action_batch)
+        state_means, state_stds = [], []
+        for head in self.state_heads:
+            state_mean, state_std = head(state_base_output, x_state_batch)
+            if self.prediction_type == "sequence":
+                state_mean = state_mean[:, -1]
+                state_std = state_std[:, -1]
+            state_means.append(state_mean)
+            state_stds.append(state_std)
+        return torch.stack(state_means), torch.stack(state_stds)
 
     def compute_loss(
         self,
@@ -326,30 +345,39 @@ class SystemDynamicsEnsemble(nn.Module):
         kl_loss = torch.mean(torch.cat(kl_losses, dim=0), dim=0)
         return state_loss, sequence_loss, bound_loss, kl_loss
 
-    def forecast(self, state_batch, action_batch):
+    def forecast(self, state_batch, action_batch) -> Forecast:
         """Open-loop forecast of the F states after the history, feeding back the ensemble-mean prediction.
 
         Deterministic counterpart of compute_state_loss (same windows and action indexing), used for evaluation.
-        Returns (state_means [B, F, state_dim], aleatoric [B, F], epistemic [B, F]).
+        Nothing is sampled, so the uncertainties of each step are those of a single step from the fed-back mean: they
+        don't accumulate over the horizon.
         """
         self.reset()
         x_state_batch = state_batch[:, : self.history_horizon]
-        state_means, aleatoric, epistemic = [], [], []
+        steps = []
         for i in range(self.forecast_horizon):
             if self.base_cfg.type in ["rnn", "rssm"] and i > 0:
                 x_action_batch = action_batch[:, self.history_horizon + i : self.history_horizon + i + 1]
             else:
                 x_action_batch = action_batch[:, i + 1 : self.history_horizon + i + 1]
-            state_mean, aleatoric_i, epistemic_i, *_ = self.forward(x_state_batch, x_action_batch)
-            state_means.append(state_mean)
-            aleatoric.append(aleatoric_i)
-            epistemic.append(epistemic_i)
+            means, stds = self._state_head_outputs(x_state_batch, x_action_batch)  # [ensemble, B, state_dim]
+            state_mean = means.mean(dim=0)
+            no_epistemic = state_mean.new_zeros(len(state_mean))  # a single head has no disagreement
+            steps.append(
+                Forecast(
+                    mean=state_mean,
+                    aleatoric=stds.mean(dim=0).sum(dim=1),
+                    epistemic=means.std(dim=0).sum(dim=1) if self.ensemble_size > 1 else no_epistemic,
+                    aleatoric_var=stds.square().mean(dim=0),
+                    epistemic_var=means.var(dim=0, correction=0),  # population variance: the heads are the mixture
+                )
+            )
             if self.base_cfg.type in ["rnn", "rssm"]:
                 x_state_batch = state_mean.unsqueeze(1)
             else:
                 x_state_batch = torch.cat([x_state_batch[:, 1:], state_mean.unsqueeze(1)], dim=1)
         self.reset()
-        return torch.stack(state_means, dim=1), torch.stack(aleatoric, dim=1), torch.stack(epistemic, dim=1)
+        return Forecast(*(torch.stack(values, dim=1) for values in zip(*steps)))
 
     def compute_auxiliary_loss(
         self, head, state_batch, action_batch, extension_batch, contact_batch, termination_batch
