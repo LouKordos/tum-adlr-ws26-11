@@ -58,7 +58,7 @@ loss:
 logging:
   log_interval: 50            # optimizer steps
   eval_interval: 1            # epochs
-  watch_interval: 1000        # gradient histograms in wandb every N steps (0 = off)
+  watch_interval: 50        # gradient histograms in wandb every N steps (0 = off)
   wandb:
     enabled: true
     project: adlr-rwm
