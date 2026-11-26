@@ -53,6 +53,9 @@ class MLPBase(nn.Module):
     def reset_partial(self, batch_indices):
         pass
 
+    def repeat_hidden_states(self, repeats: int) -> None:
+        pass  # no hidden state
+
 
 class MLPStateHead(nn.Module):
     def __init__(

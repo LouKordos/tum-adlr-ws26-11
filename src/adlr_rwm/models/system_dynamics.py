@@ -39,6 +39,24 @@ class Forecast(NamedTuple):
     epistemic_var: torch.Tensor  # [B, F, state_dim] variance of the head means
 
 
+class SampledForecast(NamedTuple):
+    """Output of SystemDynamicsEnsemble.sample_forecast(), in normalized state units.
+
+    The variances are over the particles of each window, so they include the uncertainty that accumulates over the
+    rollout. var = aleatoric_var + epistemic_var (law of total variance over the heads' particle groups), each an
+    unbiased estimate. epistemic_var subtracts the sampling noise of the heads' particle means, which would otherwise
+    add about 0.8 * aleatoric_var / (K / 5): as much as the epistemic part itself at K = 30. So for single windows it
+    can come out slightly negative; averages are unbiased.
+    """
+
+    particles: torch.Tensor  # [B, K, F, state_dim] sampled trajectories
+    head: torch.Tensor  # [K] head of each particle, the same for every window
+    mean: torch.Tensor  # [B, F, state_dim] mean over the particles
+    var: torch.Tensor  # [B, F, state_dim] variance over the particles: the propagated predictive variance
+    aleatoric_var: torch.Tensor  # [B, F, state_dim] variance within each head's particles, mean over heads
+    epistemic_var: torch.Tensor  # [B, F, state_dim] variance between the heads' particle means
+
+
 class SystemDynamicsEnsemble(nn.Module):
     def __init__(
         self,
@@ -391,6 +409,62 @@ class SystemDynamicsEnsemble(nn.Module):
                 x_state_batch = torch.cat([x_state_batch[:, 1:], state_mean.unsqueeze(1)], dim=1)
         self.reset()
         return Forecast(*(torch.stack(values, dim=1) for values in zip(*per_step)))
+
+    def sample_forecast(
+        self, state_batch, action_batch, num_particles: int, steps: int | None = None
+    ) -> SampledForecast:
+        """Monte Carlo forecast: num_particles sampled rollouts per window (trajectory sampling, as in PETS).
+
+        Every particle keeps one head for the whole rollout ("TS-infinity"), the same number of particles per head.
+        At each step its head predicts mean and std, the next state is drawn from that Gaussian and fed back. The
+        spread of the particles is the predictive uncertainty propagated through the rollout, which forecast() can't
+        show because it feeds back the mean. Same inputs and action indexing as forecast().
+        """
+        steps = self.forecast_horizon if steps is None else steps
+        B, K, E, H = len(state_batch), num_particles, self.ensemble_size, self.history_horizon
+        assert K % E == 0 and K > E, f"num_particles ({K}) must be a multiple of the ensemble size ({E}), above it"
+        assert action_batch.shape[1] >= H + steps, f"{steps} forecast steps need {H + steps} actions"
+        head = torch.arange(K, device=state_batch.device) % E  # particle k uses head k % E
+        rows, row_head = torch.arange(B * K, device=state_batch.device), head.repeat(B)
+        self.reset()
+        # The first step starts from the recorded history, the same for all particles of a window: computed once per
+        # window (for the RNN this includes warming up its memory over the H history steps), then copied K times.
+        # Particles of a window are neighbours in the batch: row = window * K + particle.
+        means, stds = self._state_head_outputs(state_batch[:, :H], action_batch[:, 1 : H + 1])  # [ensemble, B, ...]
+        means, stds = means.repeat_interleave(K, dim=1), stds.repeat_interleave(K, dim=1)  # [ensemble, B*K, ...]
+        self.state_base.repeat_hidden_states(K)
+        x_state_batch = state_batch[:, :H].repeat_interleave(K, dim=0)  # [B*K, H, state_dim]
+        action_batch = action_batch.repeat_interleave(K, dim=0)
+        samples = []
+        for i in range(steps):
+            if i > 0:
+                if self.base_cfg.type in ["rnn", "rssm"]:
+                    x_action_batch = action_batch[:, H + i : H + i + 1]
+                else:
+                    x_action_batch = action_batch[:, i + 1 : H + i + 1]
+                means, stds = self._state_head_outputs(x_state_batch, x_action_batch)  # [ensemble, B*K, state_dim]
+            mean, std = means[row_head, rows], stds[row_head, rows]  # each particle's own head
+            sample = mean + std * torch.randn_like(mean)
+            samples.append(sample)
+            if self.base_cfg.type in ["rnn", "rssm"]:
+                x_state_batch = sample.unsqueeze(1)
+            else:
+                x_state_batch = torch.cat([x_state_batch[:, 1:], sample.unsqueeze(1)], dim=1)
+        self.reset()
+
+        particles = torch.stack(samples, dim=1).view(B, K, steps, -1)
+        by_head = particles.view(B, K // E, E, steps, -1)  # particle k = j * E + head, K / E particles per head
+        aleatoric_var = by_head.var(dim=1).mean(dim=1)  # unbiased variance within each head, mean over heads
+        # Variance of the heads' particle means, minus what their sampling noise adds to it in expectation
+        epistemic_var = by_head.mean(dim=1).var(dim=1, correction=0) - (E - 1) / E * aleatoric_var / (K // E)
+        return SampledForecast(
+            particles=particles,
+            head=head,
+            mean=particles.mean(dim=1),
+            var=aleatoric_var + epistemic_var,
+            aleatoric_var=aleatoric_var,
+            epistemic_var=epistemic_var,
+        )
 
     def compute_auxiliary_loss(
         self, head, state_batch, action_batch, extension_batch, contact_batch, termination_batch

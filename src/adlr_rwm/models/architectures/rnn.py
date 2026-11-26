@@ -28,6 +28,10 @@ class RNNBase(nn.Module):
     def reset_partial(self, batch_indices):
         self.memory.reset_partial(batch_indices)
 
+    def repeat_hidden_states(self, repeats: int) -> None:
+        """Repeat every batch row's hidden state `repeats` times, the copies next to each other (repeat_interleave)."""
+        self.memory.repeat_hidden_states(repeats)
+
 
 class Memory(nn.Module):
     def __init__(self, input_dim: int, device: str, type: str, num_layers: int, hidden_size: int):
@@ -50,6 +54,13 @@ class Memory(nn.Module):
 
     def reset(self):
         self.hidden_states = None
+
+    def repeat_hidden_states(self, repeats: int) -> None:
+        # The batch is dim 1 of the hidden states (not batch_first). LSTM: tuple (h_n, c_n)
+        if isinstance(self.hidden_states, tuple):
+            self.hidden_states = tuple(h.repeat_interleave(repeats, dim=1) for h in self.hidden_states)
+        elif self.hidden_states is not None:
+            self.hidden_states = self.hidden_states.repeat_interleave(repeats, dim=1)
 
     def reset_partial(self, batch_indices):
         if self.hidden_states is not None:
