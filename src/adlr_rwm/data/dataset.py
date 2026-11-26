@@ -120,6 +120,7 @@ class RWMDataset(Dataset):
         windows: list[tuple[int, int]] = []
         state_dim: int | None = None
         action_dim: int | None = None
+        field_dims: list[int] = [0] * len(self.state_fields)  # size of each state field, from the first episode
         required_fields = (*self.state_fields, self.action_field)
 
         for file_idx, path in enumerate(self._files):
@@ -155,8 +156,11 @@ class RWMDataset(Dataset):
                     if num_samples < self.sequence_length:
                         continue
 
-                    ep_state_dim = sum(int(group[f].shape[-1]) for f in self.state_fields)
+                    ep_field_dims = [int(group[f].shape[-1]) for f in self.state_fields]
+                    ep_state_dim = sum(ep_field_dims)
                     ep_action_dim = int(group[self.action_field].shape[-1])
+                    if state_dim is None:
+                        field_dims = ep_field_dims
                     state_dim = ep_state_dim if state_dim is None else state_dim
                     action_dim = ep_action_dim if action_dim is None else action_dim
                     if (ep_state_dim, ep_action_dim) != (state_dim, action_dim):
@@ -173,6 +177,12 @@ class RWMDataset(Dataset):
 
         self.state_dim = state_dim or 0
         self.action_dim = action_dim or 0
+        # Position of each field in the concatenated state, e.g. {"robot_joint_position": slice(0, 9)}
+        bounds = np.cumsum([0, *field_dims])
+        self.state_field_slices = {
+            "_".join(field.split("/")[-2:]): slice(int(a), int(b))
+            for field, a, b in zip(self.state_fields, bounds, bounds[1:])
+        }
         return episodes, windows
 
     def _read_field(self, group: h5py.Group, field: str) -> Tensor:

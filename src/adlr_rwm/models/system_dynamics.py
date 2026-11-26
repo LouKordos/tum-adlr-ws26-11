@@ -21,6 +21,9 @@ from torch import nn
 
 from .architectures import MLPAuxiliaryHead, MLPBase, MLPStateHead, RNNBase
 
+# Names of the losses returned by SystemDynamicsEnsemble.compute_loss, in that order
+LOSS_TERMS = ("state", "sequence", "bound", "kl", "extension", "contact", "termination")
+
 
 class Forecast(NamedTuple):
     """Output of SystemDynamicsEnsemble.forecast(), in normalized state units.

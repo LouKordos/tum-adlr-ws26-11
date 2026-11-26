@@ -9,12 +9,7 @@ from datetime import timedelta
 from itertools import islice
 from pathlib import Path
 
-import h5py
 import hydra
-import matplotlib
-
-matplotlib.use("Agg")  # figures are only rendered into files for wandb, also on headless machines
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
@@ -23,167 +18,23 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR, StepLR
 from torch.utils.data import Subset
 
-from adlr_rwm.data import RWMDataset, make_dataloader
-from adlr_rwm.models import SystemDynamicsEnsemble
+from adlr_rwm.data import RWMDataset, make_dataloader, make_split
+from adlr_rwm.evaluation import (
+    evaluate,
+    figure_to_array,
+    logstd_bounds,
+    mse_and_variance_over_forecast_steps,
+    pick_rollout_windows,
+    rollout_figure,
+)
+from adlr_rwm.models import LOSS_TERMS, SystemDynamicsEnsemble
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LOSS_TERMS = ("state", "sequence", "bound", "kl", "extension", "contact", "termination")  # order of compute_loss
 log = logging.getLogger(__name__)
 
 
 def hms(seconds: float) -> timedelta:
     return timedelta(seconds=int(seconds))
-
-
-def make_split(recording: Path, val_fraction: float, test_fraction: float, seed: int) -> dict[str, list[str]]:
-    """Randomly assign every episode of a single HDF5 recording to train/val/test."""
-    with h5py.File(recording, "r") as handle:
-        demos = sorted(name for name in handle["data"] if name.startswith("demo_"))
-    episode_ids = [f"{recording.name}:{demo}" for demo in demos]  # same id format as RWMDataset(included_episodes)
-
-    # Sorted ids + fixed seed: the split only depends on which episodes exist, not on the order they are read in
-    shuffled = [episode_ids[i] for i in np.random.default_rng(seed).permutation(len(episode_ids))]
-    n_val, n_test = round(len(shuffled) * val_fraction), round(len(shuffled) * test_fraction)
-    split = {
-        "train": sorted(shuffled[n_val + n_test :]),
-        "val": sorted(shuffled[:n_val]),
-        "test": sorted(shuffled[n_val : n_val + n_test]),
-    }
-
-    return split
-
-
-def state_field_slices(recording: Path, state_fields) -> dict[str, slice]:
-    """Position of each recorded field in the concatenated state, e.g. {"robot_joint_position": slice(0, 9)}."""
-    with h5py.File(recording, "r") as handle:
-        demo = next(name for name in handle["data"] if name.startswith("demo_"))
-        bounds = np.cumsum([0, *(handle["data"][demo][field].shape[-1] for field in state_fields)])
-    return {"_".join(f.split("/")[-2:]): slice(int(a), int(b)) for f, a, b in zip(state_fields, bounds, bounds[1:])}
-
-
-@torch.no_grad()
-def logstd_bounds(model, field_slices: dict[str, slice]) -> dict[str, float]:
-    """Learned soft logstd bounds of the state heads per state field, mean over heads and dims (none without std)."""
-    heads = [head for head in model.state_heads if head.output_std]
-    if not heads:
-        return {}
-    bounds = {
-        "min": torch.cat([head.state_min_logstd for head in heads]).cpu(),  # [heads, state_dim]
-        "max": torch.cat([head.state_max_logstd for head in heads]).cpu(),
-    }
-    return {
-        f"logstd/{kind}_{name}": values[:, dims].mean().item()
-        for kind, values in bounds.items()
-        for name, dims in field_slices.items()
-    }
-
-
-@torch.no_grad()
-def evaluate(
-    model, batches, normalize, loss_type: str, loss_weights, field_slices: dict[str, slice]
-) -> tuple[dict[str, float], dict[str, list[float]]]:
-    """Mean metrics over batches, and curves over the forecast horizon.
-
-    Metrics: *_loss: configured loss. mse*: deterministic forecast error in normalized units.
-    Curves (one value per forecast step, mean over windows and state dims, normalized units): mse, and the predicted
-    variance split into aleatoric_var + epistemic_var. With calibrated uncertainty, mse ≈ total predicted variance.
-    """
-    model.eval()
-    sums, sq_err, n = defaultdict(float), 0.0, 0
-    window_err, aleatoric, epistemic = [], [], []
-    var_sums = {"aleatoric_var": 0.0, "epistemic_var": 0.0}  # [forecast step], summed over windows
-    # compute_loss samples from the predicted std, a fixed seed makes losses comparable between evaluations
-    with torch.random.fork_rng(devices=[model.device] if "cuda" in str(model.device) else []):
-        torch.manual_seed(0)
-        for batch in batches:
-            state, action = normalize(batch)
-            terms = dict(zip(LOSS_TERMS, model.compute_loss(state, action, None, None, None, loss_type=loss_type)))
-            sums["loss"] += sum(weight * terms[name] for name, weight in loss_weights.items()) * len(state)
-            for name in loss_weights:
-                sums[f"{name}_loss"] += terms[name] * len(state)
-            forecast = model.forecast(state, action)
-            err = (forecast.mean - state[:, model.history_horizon :]).square()  # [batch, forecast step, state dim]
-            sq_err = sq_err + err.sum(dim=0)
-            window_err.append(err.mean(dim=(1, 2)))
-            aleatoric.append(forecast.aleatoric.mean(dim=1))
-            epistemic.append(forecast.epistemic.mean(dim=1))
-            for name, value in var_sums.items():
-                var_sums[name] = value + getattr(forecast, name).mean(dim=2).sum(dim=0)
-            n += len(state)
-    model.train()
-
-    mse = sq_err / n  # [forecast step, state dim]
-    metrics = {name: float(value) / n for name, value in sums.items()}
-    metrics["mse"] = mse.mean().item()  # headline number: all steps and dims, comparable across loss types
-    metrics |= {f"mse_step_{k + 1}": value.item() for k, value in enumerate(mse.mean(dim=1))}
-    metrics |= {f"mse_{name}": mse[:, dims].mean().item() for name, dims in field_slices.items()}
-    # How much the error grows from the first to the last forecast step (compounding errors)
-    metrics["mse_growth"] = metrics[f"mse_step_{model.forecast_horizon}"] / metrics["mse_step_1"]
-    window_err = torch.cat(window_err)
-    for name, values in (("aleatoric", torch.cat(aleatoric)), ("epistemic", torch.cat(epistemic))):
-        metrics[name] = values.mean().item()
-        # Does the model know when it is wrong? Correlation of per-window uncertainty with per-window error
-        metrics[f"{name}_error_corr"] = torch.corrcoef(torch.stack([values, window_err]))[0, 1].item()
-    curves = {"mse": mse.mean(dim=1).tolist()} | {name: (value / n).tolist() for name, value in var_sums.items()}
-    return metrics, curves
-
-
-def pick_rollout_windows(batches, field_slices: dict[str, slice], num_windows: int, history_horizon: int):
-    """Example windows for the rollout plots: those where the object moves most during the forecast.
-
-    Returns raw (unnormalized) state and action windows. Neighbouring windows overlap (same episode, shifted by one
-    step), so picked windows are at least a sequence length apart in the loader order.
-    """
-    state, action = (torch.cat(values) for values in zip(*((batch["state"], batch["action"]) for batch in batches)))
-    position = state[:, history_horizon - 1 :, field_slices["object_root_pose"]][..., :3]  # last history step onwards
-    motion = (position - position[:, :1]).norm(dim=-1).amax(dim=1)  # largest distance from the start of the forecast
-    picked = []
-    for index in motion.argsort(descending=True).tolist():
-        if all(abs(index - other) > state.shape[1] for other in picked):
-            picked.append(index)
-        if len(picked) == num_windows:
-            break
-    return state[picked], action[picked]
-
-
-@torch.no_grad()
-def rollout_figure(model, state, action, normalize, stats, field_slices: dict[str, slice], dims):
-    """Ground truth vs forecast with ±1σ/±2σ bands of the total predictive std, one row per window, one column per dim.
-
-    state/action: raw windows [windows, H + F, dim]. dims: (state field, index within the field, axis label).
-    Plotted in physical units.
-    """
-    model.eval()
-    forecast = model.forecast(*normalize({"state": state, "action": action}))
-    model.train()
-    state_mean, state_std = stats["state"]
-    mean = (forecast.mean * state_std + state_mean).cpu().numpy()
-    std = ((forecast.aleatoric_var + forecast.epistemic_var).sqrt() * state_std).cpu().numpy()
-    state = state.cpu().numpy()
-
-    H, F = model.history_horizon, model.forecast_horizon
-    t_history, t_forecast = np.arange(-H + 1, 1), np.arange(0, F + 1)  # step 0: last history step
-    fig, axes = plt.subplots(len(state), len(dims), figsize=(4 * len(dims), 2.4 * len(state)), squeeze=False)
-    for row in range(len(state)):
-        for col, (field, index, label) in enumerate(dims):
-            d = field_slices[field].start + index
-            ax = axes[row, col]
-            last = state[row, H - 1, d]  # the forecast starts from the last history state, with zero uncertainty
-            mu, sigma = np.r_[last, mean[row, :, d]], np.r_[0.0, std[row, :, d]]
-            ax.fill_between(t_forecast, mu - 2 * sigma, mu + 2 * sigma, color="tab:blue", alpha=0.15, lw=0, label="±2σ")
-            ax.fill_between(t_forecast, mu - sigma, mu + sigma, color="tab:blue", alpha=0.3, lw=0, label="±1σ")
-            ax.plot(t_history, state[row, :H, d], color="0.6", lw=1.2, label="history")
-            ax.plot(t_forecast, state[row, H - 1 :, d], color="black", lw=1.2, label="ground truth")
-            ax.plot(t_forecast, mu, color="tab:blue", lw=1.2, label="prediction")
-            ax.axvline(0, color="0.8", lw=0.8, zorder=0)
-            ax.tick_params(labelsize=7)
-            if row == 0:
-                ax.set_title(label, fontsize=9)
-            if row == len(state) - 1:
-                ax.set_xlabel("step (0 = last history step)", fontsize=8)
-    axes[0, 0].legend(fontsize=6, loc="best")
-    fig.tight_layout()
-    return fig
 
 
 def wandb_keys(split: str, metrics: dict[str, float]) -> dict[str, float]:
@@ -286,7 +137,7 @@ def main(cfg: DictConfig) -> None:
         )
         for name, dataset in eval_sets.items()
     }
-    field_slices = state_field_slices(recording, train_set.state_fields)
+    field_slices = train_set.state_field_slices
     # The same example windows are plotted at every evaluation, picked from the first val batches
     plots = tr.logging.rollout_plots
     rollout_windows = (
@@ -338,33 +189,14 @@ def main(cfg: DictConfig) -> None:
         eval_start = time.perf_counter()
         val_batches = islice(loaders["val"], tr.limit_batches)
         val, curves = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
-        # Charts over the forecast horizon. wandb shows the latest version of each, so the MSE chart is logged with
-        # the curves of all evaluations so far.
         mse_curves.append((step, curves["mse"]))
-        horizon = list(range(1, wm.forecast_horizon + 1))
-        predicted_var = [a + e for a, e in zip(curves["aleatoric_var"], curves["epistemic_var"], strict=True)]
-        logged = wandb_keys("val", val) | {
-            "epoch": epoch,
-            "val_horizon/mse_per_eval": wandb.plot.line_series(
-                horizon,
-                [curve for _, curve in mse_curves],
-                keys=[f"step {eval_step}" for eval_step, _ in mse_curves],
-                title="Val MSE over the forecast horizon, one line per evaluation",
-                xname="forecast step",
-            ),
-            "val_horizon/mse_vs_variance": wandb.plot.line_series(
-                horizon,
-                [curves["mse"], predicted_var, curves["aleatoric_var"], curves["epistemic_var"]],
-                keys=["MSE", "predicted variance", "aleatoric variance", "epistemic variance"],
-                title=f"Val MSE vs predicted variance over the forecast horizon (step {step})",
-                xname="forecast step",
-            ),
-        }
+        charts = mse_and_variance_over_forecast_steps(mse_curves, curves, step)
+        logged = wandb_keys("val", val) | {f"val_horizon/{name}": chart for name, chart in charts.items()}
+        logged["epoch"] = epoch
         if rollout_windows is not None:
             fig = rollout_figure(model, *rollout_windows, normalize, stats, field_slices, plots.dims)
             caption = f"step {step}. σ: predictive std of the deterministic forecast (single-step, not accumulated)"
-            logged["val_rollouts/examples"] = wandb.Image(fig, caption=caption)
-            plt.close(fig)
+            logged["val_rollouts/examples"] = wandb.Image(figure_to_array(fig), caption=caption)
         run.log(logged, step=step)
         is_best = val[tr.checkpoint.best_metric] < best
         if is_best:
