@@ -60,12 +60,12 @@ logging:
   eval_interval: 1            # epochs
   watch_interval: 1000        # gradient histograms in wandb every N steps (0 = off)
   wandb:
-    enabled: true             # WANDB_MODE=offline (e.g. on the cluster) still logs locally; sync later with `wandb sync`
+    enabled: true
     project: adlr-rwm
     entity: null
-    # Same timestamp as Hydra's run directory (outputs/<date>/<time>), plus the settings you compare most often
+    # Same timestamp as Hydra's run directory (outputs/<date>/<time>)
     run_name: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${world_model.base.type}_${world_model.training.loss.type}_s${seed}
-    group: null               # same group for runs that only differ in the seed -> wandb shows mean/std
+    group: null               # same group for runs that only differ in the seed so that wandb shows mean/std
     tags: []
 
 # Saved in the run directory (outputs/<date>/<time>) next to config.yaml and split.json
