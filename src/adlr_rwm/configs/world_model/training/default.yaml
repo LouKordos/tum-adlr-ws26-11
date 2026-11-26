@@ -70,6 +70,6 @@ logging:
 
 # Saved in the run directory (outputs/<date>/<time>) next to config.yaml and split.json
 checkpoint:
-  interval: 10                # epochs, in addition to last.pt
+  interval: 2                # epochs, in addition to last.pt
   keep_best: true             # also keep best.pt, the checkpoint with the lowest val `best_metric`
   best_metric: mse            # forecast MSE (comparable across loss types), or state_loss (the configured loss)
