@@ -290,42 +290,6 @@ def read_recorded_states(episode: h5py.Group) -> dict[str, dict[str, dict[str, t
 
 
 @torch.no_grad()
-def rollout(model: SystemDynamicsEnsemble, states: torch.Tensor, actions: torch.Tensor, steps: int) -> torch.Tensor:
-    """Open-loop prediction of `steps` states after a history of H recorded states, for a batch of windows.
-
-    This is SystemDynamicsEnsemble.forecast() with a free number of steps instead of always forecast_horizon (a copy,
-    so the training code stays untouched). Same indexing, so the predictions are exactly what evaluation measures:
-    * states:  [B, H, state_dim] normalized, the recorded history
-    * actions: [B, H + steps, action_dim] normalized. actions[k] is the action that leads to states[k], which is how
-      Isaac Lab records them, so action H + i is the one that produces predicted step i.
-    * returns: [B, steps, state_dim] normalized predictions (ensemble mean), i.e. rows H .. H + steps - 1 of the
-      window. Each prediction is fed back as the input for the next step ("autoregressive").
-    """
-    H = model.history_horizon
-    recurrent = model.base_cfg.type in ("rnn", "rssm")
-    model.reset()  # clear the RNN memory, otherwise it leaks in from the previous call
-    x_state = states
-    predictions = []
-    for i in range(steps):
-        if recurrent and i > 0:
-            # The RNN remembers the history in its hidden state, so after the first step it only needs the newest
-            # state (x_state, the previous prediction) and the action that leads to the next state
-            x_action = actions[:, H + i : H + i + 1]
-        else:
-            # First step of the RNN, or every step of the MLP: the whole H-step window. Each state is paired with the
-            # action that follows it (states[k] with actions[k + 1]), hence the offset of 1.
-            x_action = actions[:, i + 1 : H + i + 1]
-        mean, *_ = model(x_state, x_action)  # forward() returns (ensemble mean, aleatoric, epistemic, aux...)
-        predictions.append(mean)
-        if recurrent:
-            x_state = mean.unsqueeze(1)
-        else:
-            # The MLP's window slides: drop the oldest state, append the prediction
-            x_state = torch.cat([x_state[:, 1:], mean.unsqueeze(1)], dim=1)
-    model.reset()
-    return torch.stack(predictions, dim=1)
-
-
 def predict_episode(
     model: SystemDynamicsEnsemble, stats: dict, states: torch.Tensor, actions: torch.Tensor, mode: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -360,7 +324,7 @@ def predict_episode(
     # Batch all windows of the episode into one call: [num_windows, H, state_dim] and [num_windows, H + steps, ...]
     state_windows = torch.stack([states_n[start - H : start] for start in starts])
     action_windows = torch.stack([actions_n[start - H : start + steps] for start in starts])
-    predictions = rollout(model, state_windows, action_windows, steps)
+    predictions = model.forecast(state_windows, action_windows, steps).mean  # ensemble mean, [windows, steps, ...]
 
     # Undo the normalization and write every window's predictions into its rows of the episode
     predictions = predictions * stats["state"][1] + stats["state"][0]

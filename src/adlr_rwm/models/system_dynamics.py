@@ -348,17 +348,27 @@ class SystemDynamicsEnsemble(nn.Module):
         kl_loss = torch.mean(torch.cat(kl_losses, dim=0), dim=0)
         return state_loss, sequence_loss, bound_loss, kl_loss
 
-    def forecast(self, state_batch, action_batch) -> Forecast:
-        """Open-loop forecast of the F states after the history, feeding back the ensemble-mean prediction.
+    def forecast(self, state_batch, action_batch, steps: int | None = None) -> Forecast:
+        """Open-loop forecast of `steps` states after the history, feeding back the ensemble-mean prediction.
 
         Deterministic counterpart of compute_state_loss (same windows and action indexing), used for evaluation.
         Nothing is sampled, so the uncertainties of each step are those of a single step from the fed-back mean: they
         don't accumulate over the horizon.
+
+        state_batch: [B, >= H, state_dim]. Only the first H states (the history) are used.
+        action_batch: [B, >= H + steps, action_dim]. Action k is the one that leads to state k (how Isaac Lab records
+            them), so action H + i produces forecast step i.
+        steps: number of forecast steps, forecast_horizon by default. Longer forecasts are fine, the model just
+            wasn't trained on them.
         """
+        steps = self.forecast_horizon if steps is None else steps
+        assert action_batch.shape[1] >= self.history_horizon + steps, (
+            f"{steps} forecast steps need {self.history_horizon + steps} actions, got {action_batch.shape[1]}"
+        )
         self.reset()
         x_state_batch = state_batch[:, : self.history_horizon]
-        steps = []
-        for i in range(self.forecast_horizon):
+        per_step = []
+        for i in range(steps):
             if self.base_cfg.type in ["rnn", "rssm"] and i > 0:
                 x_action_batch = action_batch[:, self.history_horizon + i : self.history_horizon + i + 1]
             else:
@@ -366,7 +376,7 @@ class SystemDynamicsEnsemble(nn.Module):
             means, stds = self._state_head_outputs(x_state_batch, x_action_batch)  # [ensemble, B, state_dim]
             state_mean = means.mean(dim=0)
             no_epistemic = state_mean.new_zeros(len(state_mean))  # a single head has no disagreement
-            steps.append(
+            per_step.append(
                 Forecast(
                     mean=state_mean,
                     aleatoric=stds.mean(dim=0).sum(dim=1),
@@ -380,7 +390,7 @@ class SystemDynamicsEnsemble(nn.Module):
             else:
                 x_state_batch = torch.cat([x_state_batch[:, 1:], state_mean.unsqueeze(1)], dim=1)
         self.reset()
-        return Forecast(*(torch.stack(values, dim=1) for values in zip(*steps)))
+        return Forecast(*(torch.stack(values, dim=1) for values in zip(*per_step)))
 
     def compute_auxiliary_loss(
         self, head, state_batch, action_batch, extension_batch, contact_batch, termination_batch
