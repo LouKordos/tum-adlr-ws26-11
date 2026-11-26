@@ -57,6 +57,23 @@ def state_field_slices(recording: Path, state_fields) -> dict[str, slice]:
 
 
 @torch.no_grad()
+def logstd_bounds(model, field_slices: dict[str, slice]) -> dict[str, float]:
+    """Learned soft logstd bounds of the state heads per state field, mean over heads and dims (none without std)."""
+    heads = [head for head in model.state_heads if head.output_std]
+    if not heads:
+        return {}
+    bounds = {
+        "min": torch.cat([head.state_min_logstd for head in heads]).cpu(),  # [heads, state_dim]
+        "max": torch.cat([head.state_max_logstd for head in heads]).cpu(),
+    }
+    return {
+        f"logstd/{kind}_{name}": values[:, dims].mean().item()
+        for kind, values in bounds.items()
+        for name, dims in field_slices.items()
+    }
+
+
+@torch.no_grad()
 def evaluate(
     model, batches, normalize, loss_type: str, loss_weights, field_slices: dict[str, slice]
 ) -> dict[str, float]:
@@ -249,7 +266,8 @@ def main(cfg: DictConfig) -> None:
                     "samples_per_s": rate * len(state),
                     "data_wait_fraction": data_time / elapsed,
                 }
-                run.log({f"train/{key}": value for key, value in metrics.items()} | {"epoch": epoch}, step=step)
+                train_metrics = {f"train/{key}": value for key, value in metrics.items()}
+                run.log(train_metrics | logstd_bounds(model, field_slices) | {"epoch": epoch}, step=step)
                 remaining = (tr.num_epochs - epoch) * steps_per_epoch + steps_per_epoch - i
                 terms = " ".join(f"{k[:-5]} {v:.4g}" for k, v in metrics.items() if k.endswith("_loss"))
                 log.info(
