@@ -113,6 +113,14 @@ def evaluate(
     return metrics
 
 
+def wandb_keys(split: str, metrics: dict[str, float]) -> dict[str, float]:
+    """Prefix evaluation metrics with the split. The per-step MSEs get their own section, e.g. val_per_step/mse_step_1."""
+    return {
+        (f"{split}_per_step/{key}" if key.startswith("mse_step_") else f"{split}/{key}"): value
+        for key, value in metrics.items()
+    }
+
+
 @hydra.main(config_path="../src/adlr_rwm/configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     wm = cfg.world_model
@@ -249,7 +257,7 @@ def main(cfg: DictConfig) -> None:
         eval_start = time.perf_counter()
         val_batches = islice(loaders["val"], tr.limit_batches)
         val = evaluate(model, val_batches, normalize, tr.loss.type, loss_weights, field_slices)
-        run.log({f"val/{key}": value for key, value in val.items()} | {"epoch": epoch}, step=step)
+        run.log(wandb_keys("val", val) | {"epoch": epoch}, step=step)
         is_best = val[tr.checkpoint.best_metric] < best
         if is_best:
             best = val[tr.checkpoint.best_metric]
@@ -334,8 +342,8 @@ def main(cfg: DictConfig) -> None:
     test = evaluate(
         model, islice(loaders["test"], tr.limit_batches), normalize, tr.loss.type, loss_weights, field_slices
     )
-    run.log({f"test/{key}": value for key, value in test.items()}, step=step)
-    run.summary.update({f"test/{key}": value for key, value in test.items()})
+    run.log(wandb_keys("test", test), step=step)
+    run.summary.update(wandb_keys("test", test))
     log.info(
         f"{tr.loss.type} seed {cfg.seed} | test ({checkpoint.name}) | loss {test['loss']:.4g} | mse {test['mse']:.4g}"
     )
