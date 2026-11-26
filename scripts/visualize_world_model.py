@@ -223,6 +223,10 @@ def load_world_model(checkpoint: dict, device: str) -> tuple[SystemDynamicsEnsem
     """
     wm_cfg = OmegaConf.create(checkpoint["config"]["world_model"])
     wm_cfg.device = device  # the saved config says "cuda"; follow --device instead
+    logstd_cfg = wm_cfg.state_head.logstd
+    if logstd_cfg is not None and "init_min" not in logstd_cfg:
+        # Checkpoints from before the logstd bounds were configurable used these. load_state_dict overwrites them anyway
+        logstd_cfg.init_min, logstd_cfg.init_max = -5.0, -4.0
     model = SystemDynamicsEnsemble(wm_cfg)
     model.load_state_dict(checkpoint["model"])
     model.eval()  # no dropout/batchnorm in the model today, but this is the correct mode for inference anyway

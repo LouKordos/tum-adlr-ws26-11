@@ -1,3 +1,5 @@
+import math
+
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -83,8 +85,13 @@ class MLPStateHead(nn.Module):
                 device=device,
             )
 
-            self.state_min_logstd = nn.Parameter(torch.ones(1, state_dim, device=device) * -5.0)
-            self.state_log_delta_logstd = nn.Parameter(torch.zeros(1, state_dim, device=device))
+            # Learned soft bounds: max = min + exp(log_delta) keeps max above min
+            logstd_cfg = architecture_config.logstd
+            assert logstd_cfg.init_max > logstd_cfg.init_min, (logstd_cfg.init_min, logstd_cfg.init_max)
+            self.state_min_logstd = nn.Parameter(torch.full((1, state_dim), float(logstd_cfg.init_min), device=device))
+            self.state_log_delta_logstd = nn.Parameter(
+                torch.full((1, state_dim), math.log(logstd_cfg.init_max - logstd_cfg.init_min), device=device)
+            )
 
     @property
     def state_max_logstd(self) -> torch.Tensor:

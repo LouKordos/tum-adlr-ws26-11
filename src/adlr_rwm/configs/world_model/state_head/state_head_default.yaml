@@ -3,6 +3,10 @@ mean:
   hidden_dims: [256, 256]
   activation: relu
 
-logstd:
+logstd:  # null disables the std output (deterministic head, mse loss only)
   hidden_dims: [256, 256]
   activation: relu
+  # Initial soft bounds of the predicted logstd, in normalized state units. Both are learned per state dim, and the
+  # bound loss keeps the range from growing beyond the required range. Values taken from PETS paper
+  init_min: -5.0
+  init_max: 0.25 # Data is normalized to unit std so errors should rarely exceed this
